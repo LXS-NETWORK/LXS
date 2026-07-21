@@ -25,6 +25,11 @@ func resolveMinerCoinbase(dataDir string, in io.Reader) (string, error) {
 	if dir == "" {
 		dir = "."
 	}
+	// The datadir may not exist yet (the node creates it later, but we save the wallet
+	// here first), so make sure it's there before writing into it.
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return "", fmt.Errorf("creating data directory %q: %w", dir, err)
+	}
 	walletPath := filepath.Join(dir, "lxs-wallet.txt")
 
 	// A wallet from a previous run: mine to the same address without asking again.

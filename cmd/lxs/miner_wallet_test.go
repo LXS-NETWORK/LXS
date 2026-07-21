@@ -78,6 +78,23 @@ func TestResolveMinerCoinbaseRejectsGarbage(t *testing.T) {
 	}
 }
 
+// TestResolveMinerCoinbaseCreatesDataDir: the datadir often does not exist yet on the
+// very first run (the packaged miner points -datadir at a "data" subfolder). Saving the
+// wallet must create it, not fail.
+func TestResolveMinerCoinbaseCreatesDataDir(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "does", "not", "exist", "data")
+	got, err := resolveMinerCoinbase(dir, strings.NewReader("\n"))
+	if err != nil {
+		t.Fatalf("should create a missing datadir, got: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "lxs-wallet.txt")); err != nil {
+		t.Fatalf("wallet not saved into the created datadir: %v", err)
+	}
+	if len(got) != 42 {
+		t.Fatalf("bad address: %q", got)
+	}
+}
+
 type failingReader struct{ t *testing.T }
 
 func (f failingReader) Read([]byte) (int, error) {
