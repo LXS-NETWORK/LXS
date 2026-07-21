@@ -21,14 +21,18 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"encoding/json"
 	"fmt"
 	"io"
 	"log"
+	"os"
+	"path/filepath"
 	"sync"
 	"sync/atomic"
 	"time"
 
 	"github.com/libp2p/go-libp2p"
+	dht "github.com/libp2p/go-libp2p-kad-dht"
 	pubsub "github.com/libp2p/go-libp2p-pubsub"
 	"github.com/libp2p/go-libp2p/core/control"
 	"github.com/libp2p/go-libp2p/core/crypto"
@@ -37,6 +41,8 @@ import (
 	"github.com/libp2p/go-libp2p/core/peer"
 	"github.com/libp2p/go-libp2p/core/protocol"
 	"github.com/libp2p/go-libp2p/p2p/discovery/mdns"
+	drouting "github.com/libp2p/go-libp2p/p2p/discovery/routing"
+	dutil "github.com/libp2p/go-libp2p/p2p/discovery/util"
 	"github.com/libp2p/go-libp2p/p2p/net/connmgr"
 	"github.com/multiformats/go-multiaddr"
 )
@@ -119,6 +125,10 @@ type LibP2P struct {
 	ctx  context.Context
 	stop context.CancelFunc
 
+	kdht *dht.IpfsDHT // Kademlia DHT for decentralized peer discovery; nil until wired
+
+	peersPath string // if set, where connected peers are snapshotted for restart-time re-dial
+
 	boots []peer.AddrInfo // parsed bootstrap peers, for an on-demand Redial
 
 	// banCheck, if set, is consulted before (re)dialling a bootstrap peer. It
@@ -177,8 +187,58 @@ type LibP2PConfig struct {
 	// mDNS: on a devnet it is the difference between reliable convergence and a
 	// node sitting alone because a multicast packet was dropped. mDNS stays on as
 	// a bonus, not a requirement.
+	//
+	// Multiple comma-separated seeds are supported end-to-end: the -bootstrap flag
+	// in cmd/lxs splits on "," (main.go), so each entry arrives here as its own
+	// element and gets its own keepConnected goroutine. One seed is a single
+	// discovery point; several remove that single point of failure.
 	Bootstrap []string
+
+	// PeersPath, if set, is a JSON file (in the node's datadir) where the currently
+	// connected peers are snapshotted periodically and on shutdown, and re-loaded on
+	// the next startup. Without it a restarted node whose every seed is down comes up
+	// isolated; with it the node re-dials peers it already knew, so the network heals
+	// across restarts instead of depending on a seed being reachable at that instant.
+	// Empty disables persistence (missing/corrupt file is tolerated, never fatal).
+	PeersPath string
+
+	// DHTServerMode forces the Kademlia DHT into ModeServer instead of the production
+	// default ModeAuto. Production wants ModeAuto: a public node becomes a DHT server,
+	// a NAT'd home miner stays a client, which is correct for a real network. But
+	// autonat cannot tell that a 127.0.0.1 node is publicly reachable, so on localhost
+	// ModeAuto leaves every node a client and no routing table ever forms — which is
+	// exactly what the DHT discovery test needs. Tests set this true to force server
+	// mode; leave it false everywhere else.
+	DHTServerMode bool
+
+	// DisableMDNS turns off local-link (mDNS) discovery. Production leaves it ON (a
+	// free bonus on a LAN). Tests that must prove DHT discovery in isolation set it
+	// true: all test nodes run on 127.0.0.1, where mDNS would connect them regardless
+	// of the DHT and turn a DHT test into a false green.
+	DisableMDNS bool
 }
+
+// dhtRendezvous is the advertise/find key that scopes DHT peer discovery to this
+// chain. Two chains sharing a bootstrap host would otherwise cross-discover, fail
+// each other's genesis check, and look like a peering bug rather than a config one.
+func dhtRendezvous(chainID uint64) string {
+	return fmt.Sprintf("lxs/%d", chainID)
+}
+
+// dhtDiscoveryInterval is how often the discovery loop re-queries the DHT for peers
+// advertising our rendezvous. Frequent enough that a node joining an established
+// network converges in seconds, not so frequent it hammers the routing table.
+const dhtDiscoveryInterval = 15 * time.Second
+
+// peerSnapshotInterval is how often the connected peer set is written to PeersPath.
+// A crash between snapshots loses at most this much of the peer memory, which only
+// costs a slower reconnect on the next boot, never correctness.
+const peerSnapshotInterval = 60 * time.Second
+
+// maxPersistedPeers bounds the peer snapshot file. A restarted node only needs a
+// handful of reachable peers to re-enter the DHT; an unbounded file would grow with
+// every peer ever seen and turn startup into a dial storm.
+const maxPersistedPeers = 512
 
 func NewLibP2P(ctx context.Context, cfg LibP2PConfig) (*LibP2P, error) {
 	if cfg.ChainID == 0 {
@@ -258,16 +318,24 @@ func NewLibP2P(ctx context.Context, cfg LibP2PConfig) (*LibP2P, error) {
 	// intermittently unreliable on this stack — a node can hold TCP connections
 	// that never finish the libp2p handshake, leaving it meshed with nobody. So
 	// mDNS is a bonus, not the plan.
-	svc := mdns.NewMdnsService(h, mdnsServiceTag(cfg.ChainID), &mdnsNotifee{h: h, ctx: cctx})
-	if err := svc.Start(); err != nil {
-		cancel()
-		h.Close()
-		return nil, err
+	if !cfg.DisableMDNS {
+		svc := mdns.NewMdnsService(h, mdnsServiceTag(cfg.ChainID), &mdnsNotifee{h: h, ctx: cctx})
+		if err := svc.Start(); err != nil {
+			cancel()
+			h.Close()
+			return nil, err
+		}
 	}
 
 	// Explicit bootstrap peers: dial known addresses directly and keep them
-	// connected, independent of whether mDNS found anyone.
-	for _, addr := range cfg.Bootstrap {
+	// connected, independent of whether mDNS found anyone. Peers loaded from a prior
+	// run's snapshot are folded in here as extra bootstrap entries, so a restarted
+	// node reconnects to peers it already knew even when every seed is down.
+	n.peersPath = cfg.PeersPath
+	seeds := append([]string(nil), cfg.Bootstrap...)
+	seeds = append(seeds, loadPersistedPeers(cfg.PeersPath)...)
+	var bootInfos []peer.AddrInfo // parsed seeds handed to the DHT below
+	for _, addr := range seeds {
 		ai, err := peer.AddrInfoFromString(addr)
 		if err != nil {
 			log.Printf("p2p: ignoring bad bootstrap addr %q: %v", addr, err)
@@ -276,12 +344,102 @@ func NewLibP2P(ctx context.Context, cfg LibP2PConfig) (*LibP2P, error) {
 		if ai.ID == h.ID() {
 			continue // ourselves
 		}
+		bootInfos = append(bootInfos, *ai)
 		n.boots = append(n.boots, *ai)
 		h.ConnManager().Protect(ai.ID, "bootstrap") // never trim the seed under connection pressure
 		go n.keepConnected(*ai)
 	}
 
+	// Kademlia DHT: decentralized peer discovery so the network survives at any
+	// scale without depending on a single seed. Bootstrap peers are only the way IN;
+	// once a node is in the DHT it learns of peers the seed never told it about, so a
+	// seed going down after a node has joined does not isolate it — the exact
+	// single-point-of-failure the hardcoded bootstrap list has on its own.
+	//
+	// ProtocolPrefix scopes the DHT to this chain (/lxs/<chainID>) so LXS nodes only
+	// ever populate their routing table with other LXS nodes, never the public IPFS
+	// DHT. Without the prefix a node would answer, and be answered by, every IPFS node
+	// on the internet — a privacy and correctness leak, and a genesis-mismatch storm.
+	dhtMode := dht.ModeAuto
+	if cfg.DHTServerMode {
+		dhtMode = dht.ModeServer
+	}
+	kdht, err := dht.New(h,
+		dht.ProtocolPrefix(protocol.ID(fmt.Sprintf("/lxs/%d", cfg.ChainID))),
+		dht.Mode(dhtMode),
+		dht.BootstrapPeers(bootInfos...),
+	)
+	if err != nil {
+		cancel()
+		h.Close()
+		return nil, fmt.Errorf("p2p: creating DHT: %w", err)
+	}
+	if err := kdht.Bootstrap(cctx); err != nil {
+		_ = kdht.Close()
+		cancel()
+		h.Close()
+		return nil, fmt.Errorf("p2p: bootstrapping DHT: %w", err)
+	}
+	n.kdht = kdht
+	go n.discoverLoop(cfg.ChainID)
+
+	// Peer persistence: snapshot the live peer set to disk on a timer and on
+	// shutdown, so the next boot has a warm start even if no seed answers.
+	if cfg.PeersPath != "" {
+		go n.persistLoop()
+	}
+
 	return n, nil
+}
+
+// discoverLoop advertises this node under the chain's rendezvous and repeatedly
+// asks the DHT for other nodes advertising the same key, dialling any it is not
+// already connected to. This is what turns "I know one seed" into "I know the
+// network": FindPeers returns peers the seed never directly told us about. Banned
+// peers are skipped so discovery cannot undo a warden's disconnect. Stops on ctx.
+func (n *LibP2P) discoverLoop(chainID uint64) {
+	routingDisc := drouting.NewRoutingDiscovery(n.kdht)
+	rendezvous := dhtRendezvous(chainID)
+
+	// Advertise once immediately, then let the util keep the advertisement fresh; it
+	// re-provides on its own schedule so a node stays findable for its whole lifetime.
+	dutil.Advertise(n.ctx, routingDisc, rendezvous)
+
+	// One immediate pass so a freshly-started node does not wait a full interval before
+	// its first discovery; then on the ticker.
+	find := func() {
+		fctx, cancel := context.WithTimeout(n.ctx, dhtDiscoveryInterval)
+		defer cancel()
+		peers, err := routingDisc.FindPeers(fctx, rendezvous)
+		if err != nil {
+			return // transient: an empty or not-yet-warm routing table, retried next tick
+		}
+		for pi := range peers {
+			if pi.ID == n.host.ID() || len(pi.Addrs) == 0 {
+				continue
+			}
+			if n.isBanned(pi.ID) {
+				continue // do not re-dial a peer the warden banned
+			}
+			if n.host.Network().Connectedness(pi.ID) == libp2pnet.Connected {
+				continue // already meshed with this peer
+			}
+			pi := pi
+			go func() { _ = n.host.Connect(n.ctx, pi) }()
+		}
+	}
+	find()
+
+	ticker := time.NewTicker(dhtDiscoveryInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-n.ctx.Done():
+			return
+		case <-ticker.C:
+			find()
+		}
+	}
 }
 
 // Redial forces an immediate reconnect attempt to every bootstrap peer we are
@@ -502,7 +660,16 @@ func (n *LibP2P) Disconnect(id string) error {
 }
 
 func (n *LibP2P) Close() error {
+	// Snapshot before tearing down so the last-known good peer set survives a clean
+	// shutdown; a node restarted right after this comes up with a warm peer memory
+	// even if every seed is unreachable at that moment.
+	if n.peersPath != "" {
+		n.snapshotPeers()
+	}
 	n.stop()
+	if n.kdht != nil {
+		_ = n.kdht.Close()
+	}
 	n.mu.Lock()
 	for _, s := range n.subs {
 		s.Cancel()
@@ -512,6 +679,90 @@ func (n *LibP2P) Close() error {
 	}
 	n.mu.Unlock()
 	return n.host.Close()
+}
+
+// persistLoop snapshots the connected peer set to PeersPath on a timer for the
+// node's lifetime. The on-shutdown snapshot lives in Close; this is the periodic
+// floor under it, so a node that crashes still has a recent-enough peer file. Stops
+// on ctx.
+func (n *LibP2P) persistLoop() {
+	ticker := time.NewTicker(peerSnapshotInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-n.ctx.Done():
+			return
+		case <-ticker.C:
+			n.snapshotPeers()
+		}
+	}
+}
+
+// snapshotPeers writes the currently-connected peers' dialable multiaddrs to
+// PeersPath as JSON, bounded to maxPersistedPeers. Best-effort: a write failure is
+// logged, not fatal — losing the snapshot only costs a colder next boot, never
+// correctness. The write is atomic (temp file + rename) so a crash mid-write cannot
+// leave a truncated file that the next boot fails to parse.
+func (n *LibP2P) snapshotPeers() {
+	if n.peersPath == "" {
+		return
+	}
+	var addrs []string
+	for _, pid := range n.host.Network().Peers() {
+		if len(addrs) >= maxPersistedPeers {
+			break
+		}
+		ai := n.host.Peerstore().PeerInfo(pid)
+		if len(ai.Addrs) == 0 {
+			continue
+		}
+		s, err := peer.AddrInfoToP2pAddrs(&ai)
+		if err != nil {
+			continue
+		}
+		for _, a := range s {
+			addrs = append(addrs, a.String())
+		}
+	}
+	data, err := json.Marshal(addrs)
+	if err != nil {
+		return
+	}
+	tmp := n.peersPath + ".tmp"
+	if err := os.WriteFile(tmp, data, 0o600); err != nil {
+		log.Printf("p2p: writing peer snapshot %q: %v", n.peersPath, err)
+		return
+	}
+	if err := os.Rename(tmp, n.peersPath); err != nil {
+		log.Printf("p2p: renaming peer snapshot %q: %v", n.peersPath, err)
+	}
+}
+
+// loadPersistedPeers reads a peer snapshot written by a prior run and returns its
+// multiaddrs, to be dialled as extra bootstrap entries. A missing file is the normal
+// first-run case and returns nothing; a corrupt file is logged and ignored rather
+// than crashing the node — a bad cache must never stop a node from starting, since
+// it can always re-discover peers through the seed and the DHT.
+func loadPersistedPeers(path string) []string {
+	if path == "" {
+		return nil
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if !os.IsNotExist(err) {
+			log.Printf("p2p: reading peer snapshot %q: %v", path, err)
+		}
+		return nil
+	}
+	var addrs []string
+	if err := json.Unmarshal(data, &addrs); err != nil {
+		log.Printf("p2p: ignoring corrupt peer snapshot %q: %v", filepath.Clean(path), err)
+		return nil
+	}
+	if len(addrs) > maxPersistedPeers {
+		addrs = addrs[:maxPersistedPeers]
+	}
+	return addrs
 }
 
 // Addrs returns this host's dialable addresses. For logging: the host's own

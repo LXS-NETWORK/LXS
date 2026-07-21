@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"log"
 	"math/rand"
+	"path/filepath"
 	"time"
 
 	"lxs/core"
@@ -66,11 +67,17 @@ type p2pHandles struct {
 	Disconnect func(id string) error // enforce a ban at the connection
 }
 
-func startP2P(ctx context.Context, bc *core.Blockchain, pool *mempool.Mempool, prod *core.Producer, port int, seed string, bootstrap []string) (*p2pHandles, error) {
+func startP2P(ctx context.Context, bc *core.Blockchain, pool *mempool.Mempool, prod *core.Producer, port int, seed string, bootstrap []string, datadir string) (*p2pHandles, error) {
 	cfg := p2p.LibP2PConfig{
 		ListenPort: port,
 		ChainID:    bc.ChainID(),
 		Bootstrap:  bootstrap,
+	}
+	// Persist the peer set only when there is a durable datadir to hold it. With an
+	// in-memory node there is nowhere to write, and a peers file next to a chain that
+	// vanishes on restart would point at a network the node can no longer verify.
+	if datadir != "" {
+		cfg.PeersPath = filepath.Join(datadir, "peers.json")
 	}
 	// A stable identity so bootstrap peers can name it in advance. Empty seed
 	// means an ephemeral key and mDNS-only discovery.

@@ -445,7 +445,7 @@ func runNode(args []string) error {
 	var p2pResync, p2pRedial func(context.Context) error
 	var p2pDisconnect func(string) error
 	if *p2pPort != 0 {
-		h, err := startP2P(ctx, bc, pool, prod, *p2pPort, *p2pSeed, bootstrap)
+		h, err := startP2P(ctx, bc, pool, prod, *p2pPort, *p2pSeed, bootstrap, *dataDir)
 		if err != nil {
 			return err
 		}

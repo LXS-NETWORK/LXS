@@ -28,7 +28,7 @@ type p2pHandles struct {
 	Disconnect func(id string) error
 }
 
-func startP2P(_ context.Context, _ *core.Blockchain, _ *mempool.Mempool, _ *core.Producer, port int, _ string, _ []string) (*p2pHandles, error) {
+func startP2P(_ context.Context, _ *core.Blockchain, _ *mempool.Mempool, _ *core.Producer, port int, _ string, _ []string, _ string) (*p2pHandles, error) {
 	return nil, fmt.Errorf(
 		"p2p: -p2p-port %d was set, but this binary has no networking: "+
 			"rebuild with `go build -tags libp2p,pebble -o lxs ./cmd/lxs`", port)
