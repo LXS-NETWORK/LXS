@@ -254,10 +254,10 @@ func initGenesis(args []string) error {
 }
 
 // mineCmd is the miner-facing entry point (the "click Mine" experience in CLI form). It runs
-// a node with the defaults a miner wants baked in — mine + empty-blocks + the dashboard — so
-// a miner earns continuously (the producer skips empty blocks otherwise, and a quiet chain
-// would never pay out) and can watch progress in the browser. The native double-click app just
-// wraps this command, so the right flags can never be forgotten.
+// a node with the defaults a miner wants baked in — mine + empty-blocks — so a miner earns
+// continuously (the producer skips empty blocks otherwise, and a quiet chain would never pay
+// out). Progress is the node's text log. The native double-click app just wraps this command,
+// so the right flags can never be forgotten.
 func mineCmd(args []string) error {
 	fs := flag.NewFlagSet("mine", flag.ExitOnError)
 	coinbase := fs.String("coinbase", "", "YOUR LXS address — every block reward is paid here (required)")
@@ -265,7 +265,6 @@ func mineCmd(args []string) error {
 	genesis := fs.String("genesis", "lxs-genesis.json", "genesis file (the network's identity)")
 	dataDir := fs.String("datadir", "", "database directory (empty = in-memory, lost on exit)")
 	rpcAddr := fs.String("rpc", "127.0.0.1:8545", "rpc listen address")
-	dashAddr := fs.String("dashboard", "127.0.0.1:8081", "mining dashboard address (open this in a browser)")
 	p2pPort := fs.Int("p2p-port", 0, "libp2p listen port (0 = no networking; needed to join a real network)")
 	fs.Parse(args)
 
@@ -277,11 +276,10 @@ func mineCmd(args []string) error {
 	// without it the producer only mines when there are txs, so a miner on a quiet chain earns
 	// nothing. A real PoW miner (Bitcoin-style) always mines, txs or not.
 	nodeArgs := []string{
-		"-mine", "-empty-blocks", "-mine-dashboard",
+		"-mine", "-empty-blocks",
 		"-coinbase", *coinbase,
 		"-genesis", *genesis,
 		"-rpc", *rpcAddr,
-		"-mine-dashboard-addr", *dashAddr,
 	}
 	if *dataDir != "" {
 		nodeArgs = append(nodeArgs, "-datadir", *dataDir)
@@ -294,7 +292,6 @@ func mineCmd(args []string) error {
 	}
 
 	fmt.Printf("mining to %s\n", *coinbase)
-	fmt.Printf("dashboard: open http://%s in your browser\n", *dashAddr)
 	if *p2pPort == 0 {
 		fmt.Printf("note: no -p2p-port set, so this mines a LOCAL chain only. Add -p2p-port and -bootstrap to join the network.\n")
 	}
@@ -319,12 +316,6 @@ func runNode(args []string) error {
 	minGasPrice := fs.Uint64("min-gas-price", 1, "reject txs priced below this at admission (spam floor; policy, NOT consensus — a cheaper tx in a block is still valid). 0 = accept any")
 	faucet := fs.Bool("faucet", false, "run a /faucet endpoint that gives a NEW address enough LXS to create its first token. Funded by <datadir>/faucet.key — FUND that address; the tap runs dry at exactly that balance")
 	faucetAmountWei := fs.Uint64("faucet-amount", 7_000_000, "wei per faucet claim. Default 7,000,000 wei = the REAL gas for ~5 token creations at gasPrice 1 (measured: a launchpad create burns ~1.02M gas; the create tx is submitted with a ~1.3M limit, unused refunded). Not 1 LXS — just the gas dust needed. Per-IP rate limited + one claim per address")
-	launchpad := fs.Bool("launchpad", false, "serve the embedded launchpad web UI (create/trade coins) from this node — a decentralized frontend anyone can host")
-	launchpadAddr := fs.String("launchpad-addr", ":8080", "address to serve the launchpad UI on")
-	launchpadFactory := fs.String("launchpad-factory", "", "PumpFactory address to show in the served launchpad UI")
-	launchpadRPCURL := fs.String("launchpad-rpc-url", "", "public RPC URL injected for MetaMask (default: http://<rpc-addr>)")
-	mineDashboard := fs.Bool("mine-dashboard", false, "serve a mining dashboard (balance / blocks won / hashrate / peers) from this node")
-	mineDashboardAddr := fs.String("mine-dashboard-addr", ":8081", "address to serve the mining dashboard on")
 	fs.Parse(args)
 
 	var bootstrap []string
@@ -596,28 +587,6 @@ func runNode(args []string) error {
 		FaucetAmount:   faucetAmount,
 		PeerCount:      peerCount,
 	}, bc, pool, prod)
-
-	if *mineDashboard {
-		srv, err := serveDashboard(*mineDashboardAddr, bc, prod, *mine, peerCount)
-		if err != nil {
-			return fmt.Errorf("mining dashboard: %w", err)
-		}
-		defer srv.Close()
-		log.Printf("mining dashboard serving at http://%s", *mineDashboardAddr)
-	}
-
-	if *launchpad {
-		rpcURL := *launchpadRPCURL
-		if rpcURL == "" {
-			rpcURL = "http://" + *rpcAddr
-		}
-		srv, err := serveLaunchpad(*launchpadAddr, rpcURL, *launchpadFactory, g.ChainID)
-		if err != nil {
-			return fmt.Errorf("launchpad UI: %w", err)
-		}
-		defer srv.Close()
-		log.Printf("launchpad UI serving at http://%s (factory %s, rpc %s)", *launchpadAddr, *launchpadFactory, rpcURL)
-	}
 
 	return n.Run(ctx)
 }
