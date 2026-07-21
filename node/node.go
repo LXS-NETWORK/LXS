@@ -57,7 +57,17 @@ type Config struct {
 	// PeerCount, if set, reports the number of connected p2p peers for the mining
 	// dashboard's stats. A hook, not a p2p import (rpc/node must not depend on p2p).
 	PeerCount func() int
+
+	// PoolHandler, if set, mounts the mining-pool API under /pool/. An http.Handler
+	// hook rather than a pool import for the same reason PeerCount is: node must
+	// not depend on the pool engine.
+	PoolHandler http.Handler
 }
+
+// PoolRateLimit throttles /pool/* per client IP. A worker legitimately polls
+// work every few seconds and posts a share every few more; this cap passes tens
+// of workers behind one NAT while stopping a share-flood from one host.
+var PoolRateLimit = rpc.RateLimit{Burst: 60, PerSecond: 10, MaxTracked: 8192}
 
 // MiningStats gathers the numbers the mining dashboard shows in one snapshot. hashCount is
 // cumulative (the dashboard derives a hashrate from the delta between polls); balance is the
@@ -140,6 +150,17 @@ func New(cfg Config, bc *core.Blockchain, pool *mempool.Mempool, prod *core.Prod
 		// drains the wallet as fast as it can POST.
 		outer := http.NewServeMux()
 		outer.Handle("/faucet", rpc.NewRateLimiter(faucet, FaucetRateLimit, nil))
+		outer.Handle("/", handler)
+		handler = outer
+	}
+
+	// The pool API mounts outside RPC auth/CORS for the same reason the faucet
+	// does: workers and the website must reach it even on a locked-down RPC. It
+	// gets its own limiter — share traffic has a different honest profile than
+	// RPC reads.
+	if cfg.PoolHandler != nil {
+		outer := http.NewServeMux()
+		outer.Handle("/pool/", rpc.NewRateLimiter(cfg.PoolHandler, PoolRateLimit, nil))
 		outer.Handle("/", handler)
 		handler = outer
 	}

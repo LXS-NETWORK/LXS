@@ -135,14 +135,27 @@ func VerifyHeaderPoW(h *types.Header) error {
 	return nil
 }
 
-// mine grinds the Nonce until the header satisfies its target, or aborts via the
-// stop channel (returning false). The header's Difficulty must already be set.
-func mine(h *types.Header, stop <-chan struct{}) bool {
-	target := powTarget(h.Difficulty)
-	for nonce := uint64(0); ; nonce++ {
+// PowTarget is the hash ceiling for a difficulty, exported for the mining pool:
+// the pool hands workers an EASIER target (a fraction of the block difficulty) so
+// weak machines produce steady "shares" that prove contributed work, and the pool
+// itself re-checks every share against both targets with this same function. One
+// implementation on both sides, or a pool-accepted share could be block-invalid.
+func PowTarget(difficulty uint64) *big.Int { return powTarget(difficulty) }
+
+// Grind searches nonces from start until the header hashes at or under target, or
+// stop closes. It returns the nonce to RESUME from: on success the winning nonce
+// (caller resumes at nonce+1 to hunt more shares on the same header), on abort the
+// next untried nonce. Pool workers need both behaviours; solo mining is the special
+// case target=PowTarget(h.Difficulty), start=0. Mutates h (Nonce + cached hash) —
+// the caller owns the header.
+//
+// start matters for pools: two workers grinding the same header from 0 duplicate
+// every hash; each starting at a random 64-bit offset makes overlap negligible.
+func Grind(h *types.Header, target *big.Int, start uint64, stop <-chan struct{}) (uint64, bool) {
+	for nonce := start; ; nonce++ {
 		select {
 		case <-stop:
-			return false
+			return nonce, false
 		default:
 		}
 		h.Nonce = nonce
@@ -150,7 +163,14 @@ func mine(h *types.Header, stop <-chan struct{}) bool {
 		hash := h.Hash()
 		hashCounter.Add(1)
 		if new(big.Int).SetBytes(hash[:]).Cmp(target) <= 0 {
-			return true
+			return nonce, true
 		}
 	}
+}
+
+// mine grinds the Nonce until the header satisfies its target, or aborts via the
+// stop channel (returning false). The header's Difficulty must already be set.
+func mine(h *types.Header, stop <-chan struct{}) bool {
+	_, ok := Grind(h, powTarget(h.Difficulty), 0, stop)
+	return ok
 }

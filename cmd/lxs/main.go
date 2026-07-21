@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"log"
 	"math/big"
+	"net/http"
 	"os"
 	"os/signal"
 	"runtime"
@@ -27,6 +28,7 @@ import (
 	"lxs/health"
 	"lxs/mempool"
 	"lxs/node"
+	lxspool "lxs/pool"
 	"lxs/rpc"
 	"lxs/state"
 	"lxs/types"
@@ -47,6 +49,8 @@ func main() {
 		err = runNode(os.Args[2:])
 	case "mine":
 		err = mineCmd(os.Args[2:])
+	case "pool":
+		err = poolCmd(os.Args[2:])
 	case "p2p-id":
 		err = p2pID(os.Args[2:])
 	case "balance":
@@ -266,6 +270,7 @@ func mineCmd(args []string) error {
 	dataDir := fs.String("datadir", "", "database directory (empty = in-memory, lost on exit)")
 	rpcAddr := fs.String("rpc", "127.0.0.1:8545", "rpc listen address")
 	p2pPort := fs.Int("p2p-port", 0, "libp2p listen port (0 = no networking; needed to join a real network)")
+	poolURL := fs.String("pool", "", "mine into a POOL instead of solo: the pool's URL (e.g. https://lxsnetwork.duckdns.org). Pool mining pays every miner a steady cut of each block in proportion to contributed work — the right choice for a weak machine. Solo pays the whole 50 LXS, but only when YOU win the block")
 	fs.Parse(args)
 
 	// No address given: walk a non-technical user through it — reuse a saved wallet,
@@ -277,6 +282,19 @@ func mineCmd(args []string) error {
 			return err
 		}
 		*coinbase = addr
+	}
+
+	// Pool mode is a pure worker: no node, no sync, no datadir — fetch work,
+	// grind with the SAME core.Grind the chain validates with, submit shares.
+	// Earnings accrue at the pool and pay out to -coinbase automatically.
+	if *poolURL != "" {
+		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+		defer stop()
+		fmt.Printf("POOL mining to %s\n", *coinbase)
+		fmt.Printf("pool         %s\n", *poolURL)
+		fmt.Printf("payouts      automatic, in proportion to your shares, once blocks mature\n\n")
+		w := &lxspool.Worker{BaseURL: *poolURL, Coinbase: *coinbase, Logf: log.Printf}
+		return w.Run(ctx)
 	}
 
 	// Translate to the node command with the miner defaults ON. -empty-blocks is the key one:
@@ -305,6 +323,39 @@ func mineCmd(args []string) error {
 	return runNode(nodeArgs)
 }
 
+// poolCmd is the operator-facing entry point for RUNNING a mining pool — the
+// mineCmd pattern: translate to the node command with the pool defaults baked in,
+// so the right flags can never be forgotten.
+func poolCmd(args []string) error {
+	fs := flag.NewFlagSet("pool", flag.ExitOnError)
+	genesis := fs.String("genesis", "lxs-genesis.json", "genesis file (the network's identity)")
+	dataDir := fs.String("datadir", "", "database directory (REQUIRED — holds the pool wallet + worker ledger)")
+	rpcAddr := fs.String("rpc", "127.0.0.1:8545", "rpc + pool-api listen address")
+	p2pPort := fs.Int("p2p-port", 0, "libp2p listen port (0 = no networking; a real pool must set this to join the network)")
+	bootstrap := fs.String("bootstrap", "", "extra seed multiaddrs (the built-in seeds are used regardless)")
+	feeBps := fs.Uint64("fee-bps", 0, "pool operator fee in basis points (100 = 1%). Default 0")
+	fs.Parse(args)
+
+	if *dataDir == "" {
+		return errors.New("-datadir is required: the pool wallet (pool.key) and worker ledger (pool-ledger.json) must survive restarts")
+	}
+	nodeArgs := []string{
+		"-pool-serve",
+		"-pool-fee-bps", fmt.Sprintf("%d", *feeBps),
+		"-genesis", *genesis,
+		"-datadir", *dataDir,
+		"-rpc", *rpcAddr,
+	}
+	if *bootstrap != "" {
+		nodeArgs = append(nodeArgs, "-bootstrap", *bootstrap)
+	}
+	if *p2pPort != 0 {
+		nodeArgs = append(nodeArgs, "-p2p-port", fmt.Sprintf("%d", *p2pPort))
+	}
+	fmt.Printf("starting the LXS mining pool (workers connect with: lxs mine -pool <this server's URL>)\n")
+	return runNode(nodeArgs)
+}
+
 func runNode(args []string) error {
 	fs := flag.NewFlagSet("node", flag.ExitOnError)
 	genesisPath := fs.String("genesis", "lxs-genesis.json", "genesis file")
@@ -324,6 +375,8 @@ func runNode(args []string) error {
 	minGasPrice := fs.Uint64("min-gas-price", 1, "reject txs priced below this at admission (spam floor; policy, NOT consensus — a cheaper tx in a block is still valid). 0 = accept any")
 	faucet := fs.Bool("faucet", false, "run a /faucet endpoint that gives a NEW address enough LXS to create its first token. Funded by <datadir>/faucet.key — FUND that address; the tap runs dry at exactly that balance")
 	faucetAmountWei := fs.Uint64("faucet-amount", 7_000_000, "wei per faucet claim. Default 7,000,000 wei = the REAL gas for ~5 token creations at gasPrice 1 (measured: a launchpad create burns ~1.02M gas; the create tx is submitted with a ~1.3M limit, unused refunded). Not 1 LXS — just the gas dust needed. Per-IP rate limited + one claim per address")
+	poolServe := fs.Bool("pool-serve", false, "run the MINING POOL on this node: serve /pool/work + /pool/share so many small miners combine hashrate and split each 50 LXS reward in proportion to contributed shares (PPLNS). The pool wallet is <datadir>/pool.key; the worker ledger is <datadir>/pool-ledger.json")
+	poolFeeBps := fs.Uint64("pool-fee-bps", 0, "pool operator fee in basis points (100 = 1%). Default 0: workers split the whole pot")
 	fs.Parse(args)
 
 	var userBootstrap []string
@@ -396,6 +449,25 @@ func runNode(args []string) error {
 	// Without this a reorg silently destroys every tx in the orphaned blocks:
 	// they left the pool when mined and nothing returns them.
 	core.BindMempool(bc, pool)
+
+	// Pool serving replaces local grinding: workers do the hashing, so the
+	// coinbase MUST be the pool wallet — that is the address the payout engine
+	// can spend from. A -coinbase pointing anywhere else would strand every
+	// reward where the ledger cannot reach it.
+	var poolKey *crypto.PrivateKey
+	if *poolServe {
+		if *mine {
+			return errors.New("-pool-serve and -mine are exclusive: with a pool, the WORKERS do the mining")
+		}
+		if *dataDir == "" {
+			return errors.New("-pool-serve needs -datadir: the pool wallet (pool.key) and the worker ledger (pool-ledger.json) must survive restarts — worker balances live there")
+		}
+		poolKey, _, err = loadOrCreateKey(*dataDir, "pool.key")
+		if err != nil {
+			return err
+		}
+		coinbase = poolKey.Address()
+	}
 	prod := core.NewProducer(bc, pool, coinbase)
 
 	fmt.Printf("chain id     %d\n", bc.ChainID())
@@ -587,6 +659,24 @@ func runNode(args []string) error {
 		return 0
 	}
 
+	// The pool engine: builds templates, validates shares, keeps the PPLNS
+	// ledger, matures + pays out. It runs alongside the node (not inside it) and
+	// reaches the HTTP listener through the PoolHandler hook.
+	var poolHandler http.Handler
+	if *poolServe {
+		psrv, err := lxspool.NewServer(lxspool.Config{
+			FeeBps:    *poolFeeBps,
+			StatePath: *dataDir + "/pool-ledger.json",
+		}, bc, prod, poolKey, pool, txBroadcast, log.Printf)
+		if err != nil {
+			return err
+		}
+		go psrv.Run(ctx)
+		poolHandler = psrv.Handler()
+		fmt.Printf("pool         SERVING — /pool/work /pool/share /pool/stats; PPLNS, fee %d bps\n", *poolFeeBps)
+		fmt.Printf("pool         wallet %s (rewards land + payouts leave here)\n", poolKey.Address().Hex())
+	}
+
 	n := node.New(node.Config{
 		RPCAddr:        *rpcAddr,
 		BlockTime:      *blockTime,
@@ -598,6 +688,7 @@ func runNode(args []string) error {
 		FaucetKey:      faucetKey,
 		FaucetAmount:   faucetAmount,
 		PeerCount:      peerCount,
+		PoolHandler:    poolHandler,
 	}, bc, pool, prod)
 
 	return n.Run(ctx)

@@ -3,6 +3,7 @@ package core
 import (
 	"errors"
 	"fmt"
+	"math/big"
 	"sync/atomic"
 	"time"
 
@@ -57,11 +58,16 @@ func NewProducer(bc *Blockchain, pool *mempool.Mempool, coinbase common.Address)
 	return &Producer{bc: bc, pool: pool, coinbase: coinbase}
 }
 
-// Build assembles a candidate block on top of head. It executes the transactions
-// to obtain the state root then discards that state; InsertBlock executes them
-// again. Deliberate: the producer must not hand itself a state the validator did
-// not derive.
-func (p *Producer) Build() (*types.Block, error) {
+// BuildUnsealed assembles a candidate block on top of head WITHOUT grinding the
+// nonce, for callers that outsource the proof-of-work — the mining pool hands the
+// header to remote workers instead of searching locally. minerFees is the fee
+// income this block pays its proposer (Σ per-tx fee minus the burn slice, mirroring
+// distributeFee's exact per-tx rounding): the pool needs it to know the true payout
+// pot (reward + fees), and deriving it anywhere else would drift from consensus.
+// It executes the transactions to obtain the state root then discards that state;
+// InsertBlock executes them again. Deliberate: the producer must not hand itself a
+// state the validator did not derive.
+func (p *Producer) BuildUnsealed() (blk *types.Block, minerFees *big.Int, err error) {
 	parent := p.bc.Head()
 	snapshot := p.bc.StateSnapshot()
 
@@ -92,6 +98,7 @@ func (p *Producer) Build() (*types.Block, error) {
 	// root matches. Timestamp ms -> s.
 	working.SetBlockContext(header.Height, uint64(header.Timestamp)/1000, header.Difficulty)
 	var gasUsed uint64
+	minerFees = new(big.Int)
 	included := make([]*types.Transaction, 0, len(txs))
 	receipts := make([]*types.Receipt, 0, len(txs))
 
@@ -110,6 +117,14 @@ func (p *Producer) Build() (*types.Block, error) {
 		}
 		working = trial
 		gasUsed += used
+		// Mirror distributeFee per tx: fee = used×price, burn = fee×bps/10000
+		// (rounding down PER TX — a summed-then-burned total rounds differently),
+		// proposer keeps fee−burn. This is bookkeeping for the pool payout pot,
+		// not a credit; the real credit happens in ApplyTx.
+		fee := new(big.Int).Mul(new(big.Int).SetUint64(used), tx.GasPrice)
+		burn := new(big.Int).Mul(fee, new(big.Int).SetUint64(state.FeeBurnBasisPoints))
+		burn.Div(burn, big.NewInt(10000))
+		minerFees.Add(minerFees, fee.Sub(fee, burn))
 		included = append(included, tx)
 		receipts = append(receipts, &types.Receipt{
 			Status:            status,
@@ -129,6 +144,18 @@ func (p *Producer) Build() (*types.Block, error) {
 	header.StateRoot = working.Root()
 	header.GasUsed = gasUsed
 
+	return &types.Block{Header: header, Txs: included}, minerFees, nil
+}
+
+// Build assembles a candidate block on top of head and grinds its nonce locally
+// (solo mining). Pool mining calls BuildUnsealed instead and lets workers grind.
+func (p *Producer) Build() (*types.Block, error) {
+	blk, _, err := p.BuildUnsealed()
+	if err != nil {
+		return nil, err
+	}
+	header := blk.Header
+
 	// Grind the nonce until the header hashes under target. Everything above is
 	// fixed; the nonce is the only free field. Abort if a competing block replaces
 	// the parent we built on while we grind — finishing would only produce a block
@@ -145,7 +172,7 @@ func (p *Producer) Build() (*types.Block, error) {
 			case <-done:
 				return
 			case <-t.C:
-				if p.bc.Head().Hash() != parent.Hash() {
+				if p.bc.Head().Hash() != header.ParentHash {
 					close(stop)
 					return
 				}
@@ -156,7 +183,7 @@ func (p *Producer) Build() (*types.Block, error) {
 		return nil, errMiningAborted
 	}
 
-	return &types.Block{Header: header, Txs: included}, nil
+	return blk, nil
 }
 
 // Commit inserts an already-built block, drains its txs from the pool, and
