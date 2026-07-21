@@ -268,8 +268,15 @@ func mineCmd(args []string) error {
 	p2pPort := fs.Int("p2p-port", 0, "libp2p listen port (0 = no networking; needed to join a real network)")
 	fs.Parse(args)
 
+	// No address given: walk a non-technical user through it — reuse a saved wallet,
+	// paste an address, or create a new wallet on the spot. Advanced users still just
+	// pass -coinbase and skip all prompting.
 	if *coinbase == "" {
-		return errors.New("-coinbase <your LXS address> is required — that is where your mining rewards go")
+		addr, err := resolveMinerCoinbase(*dataDir, os.Stdin)
+		if err != nil {
+			return err
+		}
+		*coinbase = addr
 	}
 
 	// Translate to the node command with the miner defaults ON. -empty-blocks is the key one:
