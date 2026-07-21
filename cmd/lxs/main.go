@@ -309,7 +309,8 @@ func runNode(args []string) error {
 	emptyBlocks := fs.Bool("empty-blocks", false, "produce blocks even with no txs")
 	p2pPort := fs.Int("p2p-port", 0, "libp2p listen port (0 = disabled)")
 	p2pSeed := fs.String("p2p-seed", "", "seed for a deterministic p2p identity (devnet; empty = ephemeral)")
-	bootstrapCSV := fs.String("bootstrap", "", "comma-separated peer multiaddrs to dial on startup")
+	bootstrapCSV := fs.String("bootstrap", "", "comma-separated peer multiaddrs to dial on startup (added ON TOP of the built-in default seeds)")
+	noDefaultBootstrap := fs.Bool("no-default-bootstrap", false, "do not add the built-in default seeds (DNS seeds + hardcoded); for isolated devnets/tests")
 	coinbaseHex := fs.String("coinbase", "", "fee recipient (default: a random address)")
 	rpcAPIKeysCSV := fs.String("rpc-api-keys", "", "comma-separated API keys required on the RPC port (empty = open; prefer env LXS_RPC_API_KEYS — argv is visible in `ps`)")
 	rpcCORSCSV := fs.String("rpc-cors", "", "comma-separated browser origins allowed to read the RPC (empty = none; \"*\" = any)")
@@ -318,12 +319,16 @@ func runNode(args []string) error {
 	faucetAmountWei := fs.Uint64("faucet-amount", 7_000_000, "wei per faucet claim. Default 7,000,000 wei = the REAL gas for ~5 token creations at gasPrice 1 (measured: a launchpad create burns ~1.02M gas; the create tx is submitted with a ~1.3M limit, unused refunded). Not 1 LXS — just the gas dust needed. Per-IP rate limited + one claim per address")
 	fs.Parse(args)
 
-	var bootstrap []string
+	var userBootstrap []string
 	for _, a := range strings.Split(*bootstrapCSV, ",") {
 		if a = strings.TrimSpace(a); a != "" {
-			bootstrap = append(bootstrap, a)
+			userBootstrap = append(userBootstrap, a)
 		}
 	}
+	// A fresh node with no -bootstrap still finds the network via the built-in seeds
+	// (direct IP + re-pointable DNS + a Bitcoin-style /dnsaddr DNS seed). The DHT then
+	// takes over, so the network is not tied to any one seed — or to the founder.
+	bootstrap := mergeBootstrap(userBootstrap, *noDefaultBootstrap)
 
 	// A secret on argv is readable by any local user via ps, so the env var is the
 	// channel for a real key; the flag is a devnet convenience. Both are honoured.

@@ -361,18 +361,17 @@ func NewLibP2P(ctx context.Context, cfg LibP2PConfig) (*LibP2P, error) {
 	// connected for the node's lifetime, protect them from connmgr trimming, and use
 	// them as DHT entry points. Independent of whether mDNS found anyone.
 	for _, addr := range cfg.Bootstrap {
-		ai, err := peer.AddrInfoFromString(addr)
-		if err != nil {
-			log.Printf("p2p: ignoring bad bootstrap addr %q: %v", addr, err)
-			continue
+		// One entry may expand to several peers: a /dnsaddr DNS seed resolves to every
+		// node its TXT records currently advertise. Direct addrs resolve to one.
+		for _, ai := range resolveBootstrap(cctx, addr) {
+			if ai.ID == h.ID() {
+				continue // ourselves
+			}
+			bootInfos = append(bootInfos, ai)
+			n.boots = append(n.boots, ai)
+			h.ConnManager().Protect(ai.ID, "bootstrap") // never trim an operator-chosen seed
+			go n.keepConnected(ai)
 		}
-		if ai.ID == h.ID() {
-			continue // ourselves
-		}
-		bootInfos = append(bootInfos, *ai)
-		n.boots = append(n.boots, *ai)
-		h.ConnManager().Protect(ai.ID, "bootstrap") // never trim an operator-chosen seed
-		go n.keepConnected(*ai)
 	}
 
 	// Peers remembered from a prior run are a WARM-START HINT, NOT trusted. They were

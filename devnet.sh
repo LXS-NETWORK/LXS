@@ -90,6 +90,7 @@ up() {
       -p2p-port "$(p2p_port $i)" \
       -p2p-seed "lxs-node-$i" \
       -bootstrap "$boot" \
+      -no-default-bootstrap \
       -block-time "$BLOCK_TIME" \
       $mine \
       > "$d/node.log" 2>&1 &
