@@ -129,6 +129,12 @@ type LibP2P struct {
 
 	peersPath string // if set, where connected peers are snapshotted for restart-time re-dial
 
+	// dialSem bounds concurrent discovery/warm-start dials. FindPeers can return up
+	// to 100 attacker-chosen addresses every tick, and a restart can have dozens of
+	// persisted hints; a goroutine-per-result dial would let a hostile result set burst
+	// unbounded outbound dials. This caps the burst without serialising it.
+	dialSem chan struct{}
+
 	boots []peer.AddrInfo // parsed bootstrap peers, for an on-demand Redial
 
 	// banCheck, if set, is consulted before (re)dialling a bootstrap peer. It
@@ -235,10 +241,31 @@ const dhtDiscoveryInterval = 15 * time.Second
 // costs a slower reconnect on the next boot, never correctness.
 const peerSnapshotInterval = 60 * time.Second
 
-// maxPersistedPeers bounds the peer snapshot file. A restarted node only needs a
-// handful of reachable peers to re-enter the DHT; an unbounded file would grow with
-// every peer ever seen and turn startup into a dial storm.
-const maxPersistedPeers = 512
+// maxPersistedPeers bounds the peer snapshot file AND the warm-start dials it drives.
+// A restarted node needs only a handful of reachable peers to re-enter the DHT, which
+// re-discovers the rest; a large file just turns startup into a dial storm and gives a
+// poisoned file more attacker-chosen dials. Small on purpose.
+const maxPersistedPeers = 64
+
+// maxConcurrentDials caps in-flight discovery/warm-start dials (dialSem depth), so a
+// hostile FindPeers result set or a poisoned peers file cannot burst unbounded outbound
+// connections. The connmgr and resource manager bound the resting state; this bounds
+// the transient.
+const maxConcurrentDials = 16
+
+// IP-group diversity caps for the DHT routing table: at most this many peers from one
+// IP group (roughly a /24 v4 or /48 v6) per bucket and across the whole table. Without
+// a diversity filter a single-subnet sybil fleet can fill the routing table and eclipse
+// the node; kad-dht ships this filter, we just have to enable it. Values follow the
+// conservative end of what IPFS uses.
+const (
+	maxPeersPerIPGroupCpl   = 2
+	maxPeersPerIPGroupTable = 3
+)
+
+// maxPeersFileBytes caps how much of peers.json is read at startup, so a crafted or
+// corrupt file (write access to the datadir) cannot OOM the node before it parses.
+const maxPeersFileBytes = 1 << 20 // 1 MiB — far above 64 multiaddrs
 
 func NewLibP2P(ctx context.Context, cfg LibP2PConfig) (*LibP2P, error) {
 	if cfg.ChainID == 0 {
@@ -262,7 +289,7 @@ func NewLibP2P(ctx context.Context, cfg LibP2PConfig) (*LibP2P, error) {
 
 	// n is created before the host so the ban gater can reference it; the gater reads
 	// n.isBanned, which is nil-safe until SetBanCheck wires the scorer.
-	n := &LibP2P{topics: make(map[Topic]*pubsub.Topic)}
+	n := &LibP2P{topics: make(map[Topic]*pubsub.Topic), dialSem: make(chan struct{}, maxConcurrentDials)}
 
 	cm, err := connmgr.NewConnManager(connLowWater, connHighWater)
 	if err != nil {
@@ -327,15 +354,13 @@ func NewLibP2P(ctx context.Context, cfg LibP2PConfig) (*LibP2P, error) {
 		}
 	}
 
-	// Explicit bootstrap peers: dial known addresses directly and keep them
-	// connected, independent of whether mDNS found anyone. Peers loaded from a prior
-	// run's snapshot are folded in here as extra bootstrap entries, so a restarted
-	// node reconnects to peers it already knew even when every seed is down.
 	n.peersPath = cfg.PeersPath
-	seeds := append([]string(nil), cfg.Bootstrap...)
-	seeds = append(seeds, loadPersistedPeers(cfg.PeersPath)...)
-	var bootInfos []peer.AddrInfo // parsed seeds handed to the DHT below
-	for _, addr := range seeds {
+	var bootInfos []peer.AddrInfo // parsed entry points handed to the DHT below
+
+	// Operator-configured bootstrap peers are TRUSTED: dial them directly, keep them
+	// connected for the node's lifetime, protect them from connmgr trimming, and use
+	// them as DHT entry points. Independent of whether mDNS found anyone.
+	for _, addr := range cfg.Bootstrap {
 		ai, err := peer.AddrInfoFromString(addr)
 		if err != nil {
 			log.Printf("p2p: ignoring bad bootstrap addr %q: %v", addr, err)
@@ -346,8 +371,31 @@ func NewLibP2P(ctx context.Context, cfg LibP2PConfig) (*LibP2P, error) {
 		}
 		bootInfos = append(bootInfos, *ai)
 		n.boots = append(n.boots, *ai)
-		h.ConnManager().Protect(ai.ID, "bootstrap") // never trim the seed under connection pressure
+		h.ConnManager().Protect(ai.ID, "bootstrap") // never trim an operator-chosen seed
 		go n.keepConnected(*ai)
+	}
+
+	// Peers remembered from a prior run are a WARM-START HINT, NOT trusted. They were
+	// merely observed on the network last time, so they are attacker-influenceable: a
+	// sybil that got into the live peer set once must NOT be promoted, across a reboot,
+	// to an un-trimmable, permanently re-dialed, protected seed — that would be an
+	// eclipse that survives restarts, and it would also let the persisted set (up to
+	// maxPersistedPeers) blow past the connmgr high-water and starve honest peers. So
+	// each is dialed ONCE (through dialSem) as a DHT entry point and then treated like
+	// any other peer: never Protect-ed, never keepConnected. The DHT and honest peers
+	// take over; a stale or hostile entry simply fails to connect and ages out.
+	for _, addr := range loadPersistedPeers(cfg.PeersPath) {
+		ai, err := peer.AddrInfoFromString(addr)
+		if err != nil || ai.ID == h.ID() {
+			continue
+		}
+		bootInfos = append(bootInfos, *ai)
+		hint := *ai
+		go func() {
+			n.dialSem <- struct{}{}
+			defer func() { <-n.dialSem }()
+			_ = h.Connect(cctx, hint)
+		}()
 	}
 
 	// Kademlia DHT: decentralized peer discovery so the network survives at any
@@ -368,6 +416,10 @@ func NewLibP2P(ctx context.Context, cfg LibP2PConfig) (*LibP2P, error) {
 		dht.ProtocolPrefix(protocol.ID(fmt.Sprintf("/lxs/%d", cfg.ChainID))),
 		dht.Mode(dhtMode),
 		dht.BootstrapPeers(bootInfos...),
+		// Eclipse defence: cap how many peers from one IP group (~/24 v4, /48 v6) may
+		// occupy the routing table, so a single-subnet sybil fleet cannot fill it and
+		// isolate the node from honest peers. kad-dht ships this filter; we enable it.
+		dht.RoutingTablePeerDiversityFilter(dht.NewRTPeerDiversityFilter(h, maxPeersPerIPGroupCpl, maxPeersPerIPGroupTable)),
 	)
 	if err != nil {
 		cancel()
@@ -425,7 +477,11 @@ func (n *LibP2P) discoverLoop(chainID uint64) {
 				continue // already meshed with this peer
 			}
 			pi := pi
-			go func() { _ = n.host.Connect(n.ctx, pi) }()
+			go func() {
+				n.dialSem <- struct{}{}
+				defer func() { <-n.dialSem }()
+				_ = n.host.Connect(n.ctx, pi)
+			}()
 		}
 	}
 	find()
@@ -721,6 +777,9 @@ func (n *LibP2P) snapshotPeers() {
 			continue
 		}
 		for _, a := range s {
+			if len(addrs) >= maxPersistedPeers {
+				break // bound the TOTAL: a multi-address peer must not overflow the cap
+			}
 			addrs = append(addrs, a.String())
 		}
 	}
@@ -747,11 +806,19 @@ func loadPersistedPeers(path string) []string {
 	if path == "" {
 		return nil
 	}
-	data, err := os.ReadFile(path)
+	f, err := os.Open(path)
 	if err != nil {
 		if !os.IsNotExist(err) {
 			log.Printf("p2p: reading peer snapshot %q: %v", path, err)
 		}
+		return nil
+	}
+	defer f.Close()
+	// Bound the read: a crafted or corrupt peers.json (write access to the datadir)
+	// must not OOM the node at startup by claiming to be gigabytes.
+	data, err := io.ReadAll(io.LimitReader(f, maxPeersFileBytes))
+	if err != nil {
+		log.Printf("p2p: reading peer snapshot %q: %v", path, err)
 		return nil
 	}
 	var addrs []string

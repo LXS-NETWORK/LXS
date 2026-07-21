@@ -4,6 +4,9 @@ package p2p
 
 import (
 	"context"
+	"encoding/json"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -96,4 +99,48 @@ func loopbackAddr(t *testing.T, n *LibP2P) string {
 	}
 	t.Fatalf("no loopback address for seed; have %v", n.Addrs())
 	return ""
+}
+
+// TestPersistedPeersAreNotProtectedSeeds locks in the security fix for the
+// reboot-surviving eclipse: a peer remembered from a prior run (peers.json) is an
+// UNTRUSTED warm-start hint, so it must never be Protected as a "bootstrap" seed.
+// If it were, a sybil that got into the live peer set once would return after every
+// reboot as an un-trimmable, permanently re-dialed seed, and the persisted set could
+// blow past the connmgr high-water and starve honest peers. Only operator-configured
+// bootstrap peers earn Protect.
+func TestPersistedPeersAreNotProtectedSeeds(t *testing.T) {
+	const chainID = 515151
+
+	a := newDHTNode(t, chainID, nil)
+	aAddr := loopbackAddr(t, a)
+	aID, err := peer.Decode(string(a.Self()))
+	if err != nil {
+		t.Fatalf("decoding A id: %v", err)
+	}
+
+	// A peers.json as if written by a prior run, listing A.
+	peersFile := filepath.Join(t.TempDir(), "peers.json")
+	data, _ := json.Marshal([]string{aAddr})
+	if err := os.WriteFile(peersFile, data, 0o600); err != nil {
+		t.Fatalf("writing peers file: %v", err)
+	}
+
+	// B loads A from PERSISTENCE (untrusted hint), not from configured bootstrap.
+	b, err := NewLibP2P(context.Background(), LibP2PConfig{
+		ChainID: chainID, PeersPath: peersFile, DHTServerMode: true, DisableMDNS: true,
+	})
+	if err != nil {
+		t.Fatalf("starting B: %v", err)
+	}
+	t.Cleanup(func() { _ = b.Close() })
+
+	if b.host.ConnManager().IsProtected(aID, "bootstrap") {
+		t.Fatal("persisted peer was Protected as a bootstrap seed — reboot-surviving eclipse vector")
+	}
+
+	// Contrast: an OPERATOR-CONFIGURED bootstrap peer IS protected (trusted).
+	c := newDHTNode(t, chainID, []string{aAddr})
+	if !c.host.ConnManager().IsProtected(aID, "bootstrap") {
+		t.Fatal("configured bootstrap peer was not protected — trusted seeds must survive trimming")
+	}
 }
