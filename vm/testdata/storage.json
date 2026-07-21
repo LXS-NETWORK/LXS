@@ -1,0 +1,40 @@
+{
+  "sstore_then_sload": {
+    "_comment": "SSTORE 42 into slot 0, SLOAD it back, RETURN it. Checks the value round-trips through storage, the post-storage, AND the exact gas (SET=20000 dominates).",
+    "exec": {
+      "address": "0x1000000000000000000000000000000000000000",
+      "caller": "0x0000000000000000000000000000000000000000",
+      "value": "0x0",
+      "gas": "0x186a0",
+      "code": "0x602a60005560005460005260206000f3",
+      "data": "0x"
+    },
+    "out": "0x000000000000000000000000000000000000000000000000000000000000002a",
+    "gas": "0x13548",
+    "post": {
+      "0x1000000000000000000000000000000000000000": {
+        "storage": {
+          "0x00": "0x2a"
+        }
+      }
+    }
+  },
+  "sstore_overwrite": {
+    "_comment": "Write 1 then 2 into slot 0; the slot ends holding 2.",
+    "exec": {
+      "address": "0x1000000000000000000000000000000000000000",
+      "caller": "0x0000000000000000000000000000000000000000",
+      "value": "0x0",
+      "gas": "0x186a0",
+      "code": "0x6001600055600260005500",
+      "data": "0x"
+    },
+    "post": {
+      "0x1000000000000000000000000000000000000000": {
+        "storage": {
+          "0x00": "0x02"
+        }
+      }
+    }
+  }
+}

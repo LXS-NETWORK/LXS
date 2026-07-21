@@ -1,0 +1,14 @@
+{
+  "keccak_empty": {
+    "_comment": "SHA3 over a zero-length window = keccak256(\"\"), the universally published empty-input digest c5d2460186f7233c927e7db2dcc703c0e500b653ca82273b7bfad8045d85a470.",
+    "exec": {
+      "address": "0x1000000000000000000000000000000000000000",
+      "caller": "0x0000000000000000000000000000000000000000",
+      "value": "0x0",
+      "gas": "0x186a0",
+      "code": "0x600060002060005260206000f3",
+      "data": "0x"
+    },
+    "out": "0xc5d2460186f7233c927e7db2dcc703c0e500b653ca82273b7bfad8045d85a470"
+  }
+}

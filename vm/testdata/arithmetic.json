@@ -1,0 +1,50 @@
+{
+  "add_mul": {
+    "_comment": "(2 + 3) * 4 = 20 (0x14). Basic arithmetic + memory + RETURN.",
+    "exec": {
+      "address": "0x1000000000000000000000000000000000000000",
+      "caller": "0x0000000000000000000000000000000000000000",
+      "value": "0x0",
+      "gas": "0x186a0",
+      "code": "0x600360020160040260005260206000f3",
+      "data": "0x"
+    },
+    "out": "0x0000000000000000000000000000000000000000000000000000000000000014"
+  },
+  "exp_2_pow_8": {
+    "_comment": "2 ** 8 = 256 (0x0100).",
+    "exec": {
+      "address": "0x1000000000000000000000000000000000000000",
+      "caller": "0x0000000000000000000000000000000000000000",
+      "value": "0x0",
+      "gas": "0x186a0",
+      "code": "0x600860020a60005260206000f3",
+      "data": "0x"
+    },
+    "out": "0x0000000000000000000000000000000000000000000000000000000000000100"
+  },
+  "sub_wraps_to_max": {
+    "_comment": "0 - 1 wraps to 2^256-1 (EVM modular arithmetic, not a fault).",
+    "exec": {
+      "address": "0x1000000000000000000000000000000000000000",
+      "caller": "0x0000000000000000000000000000000000000000",
+      "value": "0x0",
+      "gas": "0x186a0",
+      "code": "0x600160000360005260206000f3",
+      "data": "0x"
+    },
+    "out": "0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+  },
+  "sdiv_negative_truncates": {
+    "_comment": "(-7) SDIV 2 = -3 (truncation toward zero), i.e. 2^256-3.",
+    "exec": {
+      "address": "0x1000000000000000000000000000000000000000",
+      "caller": "0x0000000000000000000000000000000000000000",
+      "value": "0x0",
+      "gas": "0x186a0",
+      "code": "0x60027ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff90560005260206000f3",
+      "data": "0x"
+    },
+    "out": "0xfffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffd"
+  }
+}

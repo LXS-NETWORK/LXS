@@ -1,0 +1,26 @@
+# Secrets — NEVER commit. Keys are generated at runtime into the datadir.
+*.key
+genesis-keys.txt
+*.env
+lxs.env
+!lxs.env.example
+
+# Runtime state / data directories
+datadir/
+devnet/
+*.log
+
+# Built artifacts
+/lxs
+lxs-genesis.json
+deploy/lxs-linux-*
+deploy/lxs-darwin-*
+deploy/lxs-windows-*
+
+# Local dev / editor / OS
+.DS_Store
+.vscode/
+.idea/
+
+# Solidity toolchain (installed locally, not vendored)
+contracts/solidity/node_modules/

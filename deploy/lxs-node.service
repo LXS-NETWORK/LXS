@@ -1,0 +1,117 @@
+# systemd unit for the LXS node — process-level self-healing + a locked-down
+# sandbox for a process that faces the public internet.
+#
+# The node's in-process health layer (lxs/health) self-monitors and self-heals
+# (resync, redial, GC), but it CANNOT restart the node's OWN process: a process
+# that has panicked, been OOM-killed, or hung past a health check cannot reliably
+# bring itself back. That is what an external supervisor is for. This unit is that
+# supervisor — the honest division of labour.
+#
+# Install:
+#   sudo useradd --system --no-create-home --shell /usr/sbin/nologin lxs
+#   sudo mkdir -p /opt/lxs /var/lib/lxs /etc/lxs
+#   sudo cp lxs /opt/lxs/ && sudo cp deploy/genesis.json /etc/lxs/
+#   sudo cp deploy/lxs.env.example /etc/lxs/lxs.env   # then EDIT it, chmod 600
+#   sudo chown -R lxs:lxs /var/lib/lxs /etc/lxs
+#   sudo chmod 600 /etc/lxs/lxs.env
+#   sudo cp deploy/lxs-node.service /etc/systemd/system/
+#   sudo systemctl daemon-reload && sudo systemctl enable --now lxs-node
+#   journalctl -u lxs-node -f
+
+[Unit]
+Description=LXS L1 node
+After=network-online.target
+Wants=network-online.target
+# Crash-loop backoff lives in [Unit] (moving it from [Service] where older docs
+# put it): if the node dies 5 times in 60s, stop trying and leave it failed so
+# an operator sees a real problem instead of an endless silent restart.
+StartLimitIntervalSec=60
+StartLimitBurst=5
+
+[Service]
+Type=simple
+User=lxs
+Group=lxs
+WorkingDirectory=/opt/lxs
+
+# Secrets and config come from the environment file, NOT the command line. The
+# RPC API key is read by the binary from $LXS_RPC_API_KEYS, so it never appears
+# in `ps`, in this world-readable unit, or in the journal — the env file is the
+# one place it lives, and it is chmod 600. Non-secret topology flags stay on
+# ExecStart, where they are meant to be read and edited.
+EnvironmentFile=/etc/lxs/lxs.env
+
+# Edit these flags for this node's role. -rpc binds LOCALHOST by default: expose
+# the port to the world only behind a reverse proxy that terminates TLS and adds
+# per-IP limits, OR bind 0.0.0.0 knowingly WITH -rpc-api-keys set in the env
+# file. -bootstrap lists the peers to dial. The API key is intentionally absent
+# here — it lives in the env file.
+#
+# MINING — a producing node needs these THREE flags together (delete all three on
+# a non-mining follower):
+#   -mine                       produce blocks.
+#   -coinbase 0xYOUR_REWARDS...  where EVERY block reward is paid. This is NOT in
+#                               genesis and is NOT optional: OMIT IT AND YOUR
+#                               REWARDS GO TO A RANDOM ADDRESS YOU DO NOT CONTROL
+#                               (the binary generates a throwaway when it is empty).
+#                               Put YOUR rewards address here — public address only,
+#                               the key never touches the server.
+#   -empty-blocks               mine a heartbeat when the mempool is idle, so
+#                               followers tell "quiet" from "dead" and difficulty
+#                               keeps retargeting between real txs.
+ExecStart=/opt/lxs/lxs node \
+  -genesis /etc/lxs/genesis.json \
+  -datadir /var/lib/lxs \
+  -rpc 127.0.0.1:8545 \
+  -p2p-port 30303 \
+  -p2p-seed lxs-mainnet-node-0 \
+  -bootstrap "" \
+  -mine \
+  -coinbase 0xYOUR_REWARDS_ADDRESS \
+  -empty-blocks \
+  -block-time 2s
+
+# Self-healing: always come back, but back off so a hard crash-loop does not
+# hammer the machine.
+Restart=always
+RestartSec=2s
+
+# Enough file descriptors for many concurrent p2p + RPC connections. The default
+# 1024 is a silent ceiling a busy public node hits, and the failure looks like a
+# peering/RPC bug, not "out of fds".
+LimitNOFILE=65536
+
+# Fail loudly, never silently: journald keeps the crash reason.
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=lxs-node
+
+# --- Sandbox. A chain node parses hostile input from the open internet; assume
+# a memory-safety bug will be found and make it worth as little as possible. ---
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/lxs
+PrivateTmp=true
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+ProtectClock=true
+ProtectHostname=true
+RestrictNamespaces=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+LockPersonality=true
+# The node makes no executable-writable mappings (the Go runtime does not JIT),
+# so denying W^X costs nothing and closes a common exploit primitive.
+MemoryDenyWriteExecute=true
+# It speaks IPv4/IPv6 over TCP and talks to the kernel over unix sockets; nothing
+# else. AF_NETLINK is kept because Go's netpoller/resolver uses it on Linux.
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX AF_NETLINK
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,70 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>LXS — Launch a Token</title>
+<link rel="icon" type="image/svg+xml" href="lxs-logo.svg">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <header>
+    <div class="brand">LXS<span>.fun</span></div>
+    <div class="right">
+      <button id="addNet" class="ghost">Add LXS network</button>
+      <button id="connect">Connect Wallet</button>
+    </div>
+  </header>
+
+  <main>
+    <section class="hero">
+      <h1>Launch your token in one click</h1>
+      <p>Deploy a token on LXS straight from your wallet. No code, no bytecode — just a name and a symbol. (LXS is the coin; what you launch is a token on top of it.)</p>
+    </section>
+
+    <section id="wallet" class="wallet card" style="display:none">
+      <div class="wrow">
+        <div><div class="wlabel">Your wallet</div><div id="wAddr" class="waddr">—</div></div>
+        <div class="wbalcol"><div class="wlabel">Balance</div><div id="wBal" class="wbalnum">— LXS</div></div>
+      </div>
+      <div class="faucet-row">
+        <button id="getGas" class="ghost">Get LXS for gas (free)</button>
+        <span id="gasMsg" class="msg"></span>
+      </div>
+      <div class="send">
+        <input id="sendTo" placeholder="Recipient address 0x…">
+        <input id="sendAmt" type="number" placeholder="LXS" step="0.01" min="0">
+        <button id="sendBtn">Send LXS</button>
+      </div>
+      <div id="sendMsg" class="msg"></div>
+    </section>
+
+    <section class="create card">
+      <h2>Create a token</h2>
+      <div class="grid">
+        <label>Name <input id="name" placeholder="My Coin" maxlength="32"></label>
+        <label>Symbol <input id="symbol" placeholder="MYC" maxlength="10"></label>
+      </div>
+      <label class="imgpick">Photo (optional) <input id="image" type="file" accept="image/*"></label>
+      <label>First buy (optional, LXS) <input id="devbuy" type="number" placeholder="0" step="0.01" min="0"></label>
+      <button id="create" disabled>Connect wallet to create</button>
+      <div id="createMsg" class="msg"></div>
+    </section>
+
+    <section class="list">
+      <div class="list-head">
+        <h2>Tokens</h2>
+        <button id="refresh" class="ghost">Refresh</button>
+      </div>
+      <div id="coins" class="coins"><p class="dim">Connect your wallet to load tokens.</p></div>
+    </section>
+  </main>
+
+  <footer>
+    <p>Running on LXS (chain 2254). Your keys never leave your wallet. Every token
+    trades instantly on its own bonding curve — no upfront liquidity needed.</p>
+  </footer>
+
+  <script src="app.js"></script>
+</body>
+</html>
