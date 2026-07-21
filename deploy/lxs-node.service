@@ -47,6 +47,13 @@ EnvironmentFile=/etc/lxs/lxs.env
 # file. -bootstrap lists the peers to dial. The API key is intentionally absent
 # here — it lives in the env file.
 #
+# POOL — to run the MINING POOL on this node instead of solo mining (weak
+# machines team up and split every reward in proportion to contributed shares),
+# use -pool-serve INSTEAD of the three mining flags. Rewards land in the wallet
+# at <datadir>/pool.key and pay out automatically; the worker ledger lives in
+# <datadir>/pool-ledger.json. Workers connect with:
+#   lxs mine -pool https://<this-node's-https-endpoint>
+#
 # MINING — a producing node needs these THREE flags together (delete all three on
 # a non-mining follower):
 #   -mine                       produce blocks.
