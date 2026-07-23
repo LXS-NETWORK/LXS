@@ -247,7 +247,7 @@ func (a *API) SendTransaction(params json.RawMessage) (interface{}, error) {
 	if err := mempool.CheckState(a.bc.StateSnapshot(), tx); err != nil {
 		return nil, Err(CodeServerError, err.Error())
 	}
-	if err := a.pool.Add(tx, a.bc.ChainID()); err != nil {
+	if err := a.pool.AddLocal(tx, a.bc.ChainID()); err != nil {
 		// Rejection reasons are safe to return: the client needs them to bump
 		// the nonce, raise the fee, or give up.
 		return nil, Err(CodeServerError, err.Error())

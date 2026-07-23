@@ -14,6 +14,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"runtime"
 	"runtime/debug"
 	"strings"
@@ -445,6 +446,14 @@ func runNode(args []string) error {
 	pool := mempool.New(8192)
 	if *minGasPrice > 0 {
 		pool.SetMinGasPrice(new(big.Int).SetUint64(*minGasPrice)) // admission spam floor
+	}
+	// Persist locally-submitted txs so a restart does not silently drop a user's own
+	// transaction (only meaningful with a datadir; an in-memory node loses everything
+	// by definition). Replay happens now, before the node starts accepting new txs.
+	if *dataDir != "" {
+		if n := pool.EnableJournal(filepath.Join(*dataDir, "txjournal.jsonl"), bc.ChainID()); n > 0 {
+			fmt.Printf("mempool      replayed %d pending tx(s) from the journal\n", n)
+		}
 	}
 	// Without this a reorg silently destroys every tx in the orphaned blocks:
 	// they left the pool when mined and nothing returns them.

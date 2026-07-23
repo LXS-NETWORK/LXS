@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"math/big"
+	"os"
 	"sort"
 	"sync"
 
@@ -67,6 +68,11 @@ type Mempool struct {
 	minGasPrice *big.Int
 	all         map[common.Hash]*types.Transaction
 	byAcct      map[common.Address]map[uint64]*types.Transaction
+	// Local (RPC/faucet-submitted) txs are journaled to disk so a node restart
+	// does not silently drop a user's own transaction. journalPath=="" disables it.
+	journalPath string
+	journalFile *os.File
+	local       map[common.Hash]struct{}
 }
 
 func New(maxSize int) *Mempool {
@@ -74,6 +80,7 @@ func New(maxSize int) *Mempool {
 		maxSize: maxSize,
 		all:     make(map[common.Hash]*types.Transaction),
 		byAcct:  make(map[common.Address]map[uint64]*types.Transaction),
+		local:   make(map[common.Hash]struct{}),
 	}
 }
 
@@ -298,8 +305,14 @@ func (m *Mempool) PendingNonce(addr common.Address, base uint64) uint64 {
 func (m *Mempool) Remove(txs []*types.Transaction) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	removedLocal := false
 	for _, tx := range txs {
-		delete(m.all, tx.Hash())
+		h := tx.Hash()
+		delete(m.all, h)
+		if _, ok := m.local[h]; ok {
+			delete(m.local, h)
+			removedLocal = true
+		}
 		if sender, err := tx.Sender(); err == nil {
 			if byNonce, ok := m.byAcct[sender]; ok {
 				delete(byNonce, tx.Nonce)
@@ -308,6 +321,9 @@ func (m *Mempool) Remove(txs []*types.Transaction) {
 				}
 			}
 		}
+	}
+	if removedLocal {
+		m.rewriteJournalLocked() // a journaled tx got mined — compact it out
 	}
 }
 

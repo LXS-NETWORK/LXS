@@ -136,7 +136,7 @@ func (f *Faucet) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "faucet unavailable (fund the faucet wallet): "+err.Error(), http.StatusServiceUnavailable)
 		return
 	}
-	if err := f.pool.Add(tx, f.bc.ChainID()); err != nil {
+	if err := f.pool.AddLocal(tx, f.bc.ChainID()); err != nil {
 		http.Error(w, "pool: "+err.Error(), http.StatusServiceUnavailable)
 		return
 	}

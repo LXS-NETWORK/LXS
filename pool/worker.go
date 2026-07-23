@@ -11,6 +11,7 @@ import (
 	"math/big"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	"lxs/core"
@@ -95,17 +96,18 @@ func (w *Worker) Run(ctx context.Context) error {
 		}
 
 		// Grind one slice. stop fires at the slice deadline; a found share
-		// returns early with its nonce and we resume right after it.
+		// returns early with its nonce and we resume right after it. A sync.Once
+		// guards the close: if a share is found at the same instant the deadline
+		// fires, the timer's func and the cleanup below would otherwise both
+		// close(stop) — a "close of closed channel" panic that kills the miner.
 		stop := make(chan struct{})
-		timer := time.AfterFunc(grindSlice, func() { close(stop) })
+		var once sync.Once
+		closeStop := func() { once.Do(func() { close(stop) }) }
+		timer := time.AfterFunc(grindSlice, closeStop)
 		start := next
 		nonce, found := core.Grind(hdr, target, next, stop)
 		timer.Stop()
-		select {
-		case <-stop:
-		default:
-			close(stop)
-		}
+		closeStop()
 		hashes += nonce - start
 		next = nonce
 		if found {

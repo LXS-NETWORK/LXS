@@ -124,7 +124,7 @@ func (a *API) EthSendRawTransaction(params json.RawMessage) (interface{}, error)
 	if err := mempool.CheckState(a.bc.StateSnapshot(), tx); err != nil {
 		return nil, Err(CodeServerError, err.Error())
 	}
-	if err := a.pool.Add(tx, a.bc.ChainID()); err != nil {
+	if err := a.pool.AddLocal(tx, a.bc.ChainID()); err != nil {
 		return nil, Err(CodeServerError, err.Error())
 	}
 	if a.onTx != nil {
