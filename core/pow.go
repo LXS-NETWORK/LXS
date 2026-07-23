@@ -63,7 +63,13 @@ const LwmaWindow = 90
 // Reference: zawy12/difficulty-algorithms (LWMA-1). Pure + deterministic: every node
 // computes the same value from the same window, or the network forks.
 func lwmaDifficulty(window []*types.Header) uint64 {
-	const N = LwmaWindow
+	// N derives from the window length (window has N+1 headers: window[0] is the
+	// block just before the averaging span). Deriving it — rather than hardcoding
+	// LwmaWindow — lets the retarget run over a PARTIAL window on a young chain, so
+	// difficulty tracks real hashrate from the first few blocks instead of staying
+	// frozen at the genesis value until block LwmaWindow. All guards/weights below
+	// already scale with N, so the math is valid for any N >= 2.
+	N := len(window) - 1
 	T := TargetBlockTime // target solvetime, same unit as Header.Timestamp (ms)
 
 	var L int64 // Σ i·solvetime_i  (linear weights 1..N; recent blocks weigh more)

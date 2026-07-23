@@ -19,6 +19,38 @@ func lwmaWindowConst(startTs, solvetime int64, diff uint64) []*types.Header {
 	return w
 }
 
+// lwmaWindowN builds an N+1 header window (N solvetimes) with constant solvetime and
+// difficulty — for testing PARTIAL windows on a young chain, where N < LwmaWindow.
+func lwmaWindowN(n int, startTs, solvetime int64, diff uint64) []*types.Header {
+	w := make([]*types.Header, n+1)
+	ts := startTs
+	for i := range w {
+		w[i] = &types.Header{Timestamp: ts, Difficulty: diff}
+		ts += solvetime
+	}
+	return w
+}
+
+// A young chain (a partial window, far fewer than LwmaWindow blocks) must still
+// retarget: LWMA derives N from the window length. With blocks arriving 8× slower
+// than target, difficulty must drop sharply — this is exactly what lets a fresh
+// chain fall from an over-set genesis difficulty to the real hashrate in a few
+// blocks. If N were hardcoded to LwmaWindow, this short window would panic on an
+// out-of-range index, so the test also guards the derivation itself.
+func TestLwmaPartialWindowRetargetsDown(t *testing.T) {
+	const D = 1_000_000
+	got := lwmaDifficulty(lwmaWindowN(4, 1_000_000_000, 8*TargetBlockTime, D))
+	if got >= D/3 {
+		t.Fatalf("with 8×-slow blocks over a 4-block window, difficulty = %d; expected a sharp drop (well below D/3 = %d)", got, D/3)
+	}
+	// And a partial window exactly on target keeps the same avgD·0.99 equilibrium
+	// as a full window — proving the math scales with N.
+	eq := lwmaDifficulty(lwmaWindowN(5, 1_000_000_000, TargetBlockTime, D))
+	if want := uint64(D * 99 / 100); eq != want {
+		t.Fatalf("on-target 5-block window = %d, want %d (avgD·0.99)", eq, want)
+	}
+}
+
 // At equilibrium (every block exactly on target) LWMA returns avgD·0.99 exactly — the
 // intended slight downward bias that keeps mean spacing at ~T.
 func TestLwmaEquilibriumIsStable(t *testing.T) {

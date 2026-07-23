@@ -213,7 +213,7 @@ func TestReorgDeeperThanRetentionIsRefused(t *testing.T) {
 
 	// A block claiming that ancient parent must be refused, not applied. Valid PoW,
 	// so the refusal is about the retention window, not the proof.
-	ts := deep.Header.Timestamp + 1000
+	ts := deep.Header.Timestamp + TargetBlockTime
 	forged := &types.Block{
 		Header: &types.Header{
 			ParentHash: deep.Hash(),
@@ -222,7 +222,7 @@ func TestReorgDeeperThanRetentionIsRefused(t *testing.T) {
 			GasLimit:   deep.Header.GasLimit,
 			Proposer:   newKey(t).Address(),
 			TxRoot:     types.TxRoot(nil),
-			Difficulty: deep.Header.Difficulty, // test chain < LwmaWindow: difficulty holds at genesis
+			Difficulty: bc.RequiredDifficulty(deep.Header), // LWMA-derived, matches the validator
 		},
 	}
 	mine(forged.Header, nil)

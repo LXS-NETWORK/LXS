@@ -10,16 +10,16 @@ import (
 	"lxs/vm"
 )
 
-// BaseBlockReward is era-0 issuance before any halving: 50 LXS, 100% to the
+// BaseBlockReward is era-0 issuance before any halving: 25 LXS, 100% to the
 // miner. With 4-minute blocks (core.TargetBlockTime) and halving every 1,000,000
-// blocks (~7.6 yr/era), total mined ≈ 2 * base * HalvingInterval = 100,000,000
-// LXS, ending when the reward reaches 0 (~66 halvings, ~500 yr). Effective max ≈
-// 20M genesis + 100M mined = 120M.
-var BaseBlockReward = new(big.Int).Mul(big.NewInt(50), big.NewInt(1e18)) // 50 LXS
+// blocks, total mined ≈ 2 * base * HalvingInterval = 50,000,000 LXS, ending when
+// the reward reaches 0. Effective max supply ≈ 70M genesis premine (20M founder +
+// 50M ecosystem/liquidity) + 50M mined = 120M.
+var BaseBlockReward = new(big.Int).Mul(big.NewInt(25), big.NewInt(1e18)) // 25 LXS
 
-// HalvingInterval is the block count between reward halvings (50 -> 25 -> ...
+// HalvingInterval is the block count between reward halvings (25 -> 12.5 -> ...
 // -> 0). The reward sum is a converging geometric series (total ≈ 2 * base *
-// interval = 100M), so issuance is finite though the chain runs forever.
+// interval = 50M), so issuance is finite though the chain runs forever.
 //
 // When the reward reaches zero, tx fees are the miner's only revenue and security
 // becomes fee-based, which is why fees flow to the miner today (see distributeFee).

@@ -17,6 +17,7 @@ import (
 // builds on head.
 type branch struct {
 	t        *testing.T
+	bc       *Blockchain
 	tip      *types.Block
 	st       *state.State
 	proposer common.Address
@@ -28,21 +29,21 @@ func newBranch(t *testing.T, bc *Blockchain, parent *types.Block) *branch {
 	if err != nil {
 		t.Fatalf("no state at parent %s: %v", parent.Hash().Hex(), err)
 	}
-	return &branch{t: t, tip: parent, st: st, proposer: newKey(t).Address()}
+	return &branch{t: t, bc: bc, tip: parent, st: st, proposer: newKey(t).Address()}
 }
 
 // next builds the next block on this branch without inserting it.
 func (b *branch) next(txs ...*types.Transaction) *types.Block {
 	b.t.Helper()
 
-	ts := b.tip.Header.Timestamp + 1000
+	ts := b.tip.Header.Timestamp + TargetBlockTime // space at target so LWMA holds difficulty steady
 	header := &types.Header{
 		ParentHash: b.tip.Hash(),
 		Height:     b.tip.Height() + 1,
 		Timestamp:  ts,
 		GasLimit:   b.tip.Header.GasLimit,
 		Proposer:   b.proposer,
-		Difficulty: b.tip.Header.Difficulty, // < LwmaWindow blocks: difficulty holds at genesis
+		Difficulty: b.bc.RequiredDifficulty(b.tip.Header), // LWMA-derived, matches the validator
 	}
 
 	var gasUsed uint64

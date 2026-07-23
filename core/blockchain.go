@@ -466,13 +466,22 @@ func (bc *Blockchain) BlockByHash(h common.Hash) (*types.Block, error) {
 // Caller must hold bc.mu (uses the unlocked blockLocked); InsertBlock already holds it.
 func (bc *Blockchain) requiredDifficultyLocked(parent *types.Header) uint64 {
 	const N = LwmaWindow
-	if parent.Height < N {
+	const minWindow = 3 // below this LWMA is too noisy; hold the genesis difficulty
+	// Retarget over the largest window available: the full LwmaWindow once the chain
+	// is that tall, or the whole chain so far while it is younger. This is what lets
+	// a fresh chain drop from an over-set genesis difficulty to the real hashrate
+	// within a few blocks, instead of stalling at genesis until block LwmaWindow.
+	w := int(parent.Height)
+	if w > N {
+		w = N
+	}
+	if w < minWindow {
 		return bc.genesisDifficulty
 	}
-	window := make([]*types.Header, N+1)
-	window[N] = parent
+	window := make([]*types.Header, w+1)
+	window[w] = parent
 	cur := parent
-	for i := N - 1; i >= 0; i-- {
+	for i := w - 1; i >= 0; i-- {
 		b, err := bc.blockLocked(cur.ParentHash)
 		if err != nil {
 			// A linked block always retains its ancestors within the window; a miss
