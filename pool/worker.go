@@ -122,7 +122,7 @@ func (w *Worker) Run(ctx context.Context) error {
 				w.Logf("share accepted (#%d) at height %d", shares, cur.Height)
 			}
 		}
-		if time.Since(lastStats) >= 30*time.Second {
+		if time.Since(lastStats) >= 8*time.Second {
 			secs := time.Since(lastStats).Seconds()
 			w.Logf("hashrate ~%.0f H/s · shares %d · pool height %d · share difficulty %d",
 				float64(hashes)/secs, shares, cur.Height, cur.ShareDiff)

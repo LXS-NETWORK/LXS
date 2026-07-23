@@ -205,6 +205,10 @@ func (n *Node) Run(ctx context.Context) error {
 			defer wg.Done()
 			n.produce(ctx)
 		}()
+		// A SOLO producer otherwise never reports a hashrate, so the miner-app
+		// dashboard reads a flat zero and looks broken (a real support complaint).
+		// The pool worker prints its own; this gives solo the same live line.
+		go n.logHashrate(ctx)
 	} else {
 		log.Printf("follower mode: not producing blocks")
 	}
@@ -285,6 +289,33 @@ func (n *Node) produce(ctx context.Context) {
 		}
 		log.Printf("mined block %d  %s  txs=%d  gas=%d  difficulty=%d",
 			blk.Height(), short(blk.Hash().Hex()), len(blk.Txs), blk.Header.GasUsed, blk.Header.Difficulty)
+	}
+}
+
+// logHashrate samples the process-wide PoW hash counter and prints a line the
+// miner-app dashboard parses ("hashrate ~N H/s"), so SOLO mining shows a live
+// rate like pool mining does. Same 8s cadence both sides for quick first feedback.
+func (n *Node) logHashrate(ctx context.Context) {
+	const every = 8 * time.Second
+	t := time.NewTicker(every)
+	defer t.Stop()
+	last, lastT := core.HashCount(), time.Now()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			now := core.HashCount()
+			dt := time.Since(lastT).Seconds()
+			var rate float64
+			if dt > 0 {
+				rate = float64(now-last) / dt
+			}
+			last, lastT = now, time.Now()
+			h := n.bc.Head()
+			log.Printf("hashrate ~%.0f H/s · height %d · difficulty %d",
+				rate, h.Height(), h.Header.Difficulty)
+		}
 	}
 }
 
