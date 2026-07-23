@@ -466,7 +466,7 @@ func (bc *Blockchain) BlockByHash(h common.Hash) (*types.Block, error) {
 // Caller must hold bc.mu (uses the unlocked blockLocked); InsertBlock already holds it.
 func (bc *Blockchain) requiredDifficultyLocked(parent *types.Header) uint64 {
 	const N = LwmaWindow
-	const minWindow = 3 // below this LWMA is too noisy; hold the genesis difficulty
+	const minWindow = 2 // retarget from block 3 (needs 2 solvetimes); before that, hold genesis
 	// Retarget over the largest window available: the full LwmaWindow once the chain
 	// is that tall, or the whole chain so far while it is younger. This is what lets
 	// a fresh chain drop from an over-set genesis difficulty to the real hashrate

@@ -48,10 +48,11 @@ func satisfiesPoW(h *types.Header) bool {
 	return new(big.Int).SetBytes(hash[:]).Cmp(powTarget(h.Difficulty)) <= 0
 }
 
-// LwmaWindow is the number of recent blocks LWMA averages. For a ~4-minute target,
-// ~90 blocks (~6 hours) balances responsiveness against per-block noise (zawy's band for
-// this block time).
-const LwmaWindow = 90
+// LwmaWindow is the number of recent blocks LWMA averages. 45 blocks (~3 hours at
+// the 4-minute target) reacts fast to hashrate that comes and goes — a home miner
+// opening and closing the app — while staying inside zawy's stable band, so the
+// chain re-finds the target within a shorter run of blocks after a hashrate jump.
+const LwmaWindow = 45
 
 // lwmaDifficulty derives a block's difficulty from a window of the LwmaWindow+1 most recent
 // headers (oldest first; window[LwmaWindow] is the parent), using zawy's LWMA-1. It sets
