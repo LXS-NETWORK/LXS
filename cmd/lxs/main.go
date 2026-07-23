@@ -557,6 +557,14 @@ func runNode(args []string) error {
 		Now:       time.Now,
 		StartedAt: time.Now(),
 		Producing: *mine,
+		// Head-age alarms must scale to THIS chain's block time, not the package
+		// defaults (60s/5m, tuned for fast blocks). At a 4-minute target with one
+		// miner, block spacing is Poisson: a head 1–5 min old is normal, not a
+		// stall. Flagging it DEGRADED/CRITICAL every interval (and triggering a
+		// pointless resync) is the false alarm miners reported. 3× target before
+		// "falling behind", 6× before "stalled".
+		StaleAfter:    3 * time.Duration(core.TargetBlockTime) * time.Millisecond,
+		CriticalStale: 6 * time.Duration(core.TargetBlockTime) * time.Millisecond,
 	}
 	if *dataDir != "" { // disk is only meaningful with a persistent datadir
 		healthMon.DiskFree = func() (uint64, uint64) { return diskFree(*dataDir) }
@@ -567,7 +575,10 @@ func runNode(args []string) error {
 	healer := &health.Healer{
 		Resync:           p2pResync,
 		Redial:           p2pRedial,
-		StaleResyncAfter: 90 * time.Second,
+		// Only resync when the head is genuinely stalled for this chain (5× the
+		// 4-min target = 20 min), not on normal single-miner block variance.
+		// Resyncing every 90s did nothing but spam the log and churn peers.
+		StaleResyncAfter: 5 * time.Duration(core.TargetBlockTime) * time.Millisecond,
 		Cooldown:         60 * time.Second,
 		// Reclaim resources the node diagnosed in itself. GC + FreeOSMemory is
 		// always safe and cannot corrupt state.
