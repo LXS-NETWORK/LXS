@@ -481,7 +481,10 @@ func runNode(args []string) error {
 		fmt.Printf("rpc auth     OFF — the RPC port is open to anyone who can reach it\n")
 	}
 	if *mine {
-		fmt.Printf("role         PRODUCER (block time %s)\n", *blockTime)
+		// Do NOT print the -block-time flag here: it is a devnet pacing knob the
+		// PoW path never reads (difficulty is the clock), and "block time 2s" in
+		// the banner reads as a bug on a 4-minute chain.
+		fmt.Printf("role         PRODUCER — PoW paced by difficulty (target %dm per block)\n", core.TargetBlockTime/60000)
 	} else {
 		fmt.Printf("role         follower (not producing)\n")
 	}
@@ -573,8 +576,8 @@ func runNode(args []string) error {
 	// head, redial bootstrap when isolated — throttled by a cooldown, and a no-op
 	// when a remedy is not wired (no p2p). Driven by the Reporter's per-tick hook.
 	healer := &health.Healer{
-		Resync:           p2pResync,
-		Redial:           p2pRedial,
+		Resync: p2pResync,
+		Redial: p2pRedial,
 		// Only resync when the head is genuinely stalled for this chain (5× the
 		// 4-min target = 20 min), not on normal single-miner block variance.
 		// Resyncing every 90s did nothing but spam the log and churn peers.
