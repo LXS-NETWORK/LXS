@@ -164,6 +164,34 @@ func startP2P(ctx context.Context, bc *core.Blockchain, pool *mempool.Mempool, p
 		}
 	})
 
+	// Re-announce pending txs on a timer. GossipSub only delivers a tx to peers
+	// SUBSCRIBED when it is first published; a miner that joins later (e.g. a user
+	// opening the miner app) never receives a tx that was already waiting, so it
+	// mines empty blocks while that tx starves — observed live, and exactly the
+	// failure mode of casual miners that come and go. Re-publishing the mempool
+	// every 15s guarantees any miner gets every pending tx within one interval of
+	// connecting. GossipSub dedups and onTx treats ErrAlreadyKnown as a no-op, so
+	// peers that already hold a tx drop the repeat cheaply. Bounded to one block's
+	// worth of txs (mempool.Pending fills to the gas limit) so it can't flood.
+	go func() {
+		t := time.NewTicker(15 * time.Second)
+		defer t.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-t.C:
+				head := bc.Head()
+				if head == nil {
+					continue
+				}
+				for _, tx := range pool.Pending(bc.StateSnapshot(), head.Header.GasLimit) {
+					_ = txg.Broadcast(tx)
+				}
+			}
+		}
+	}()
+
 	for _, a := range net.Addrs() {
 		log.Printf("p2p listening: %s", a)
 	}
