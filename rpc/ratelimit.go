@@ -5,6 +5,7 @@ import (
 	"math"
 	"net"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 )
@@ -147,16 +148,32 @@ func (rl *RateLimiter) evict(now time.Time) {
 	}
 }
 
-// clientIP is the bucket key: the real socket peer, host only.
+// clientIP is the bucket key: normally the real socket peer, host only.
 //
-// X-Forwarded-For (or any client-supplied header) is not honoured: it is
-// attacker-controlled, so trusting it would let one host forge a distinct source
-// per request, minting a fresh bucket each time and defeating the limiter. A
-// trusted reverse proxy rewriting the socket peer is handled at that proxy.
+// X-Forwarded-For from an arbitrary client is NOT honoured — it is attacker-
+// controlled, so trusting it blindly would let one host forge a distinct source
+// per request and mint a fresh bucket each time, defeating the limiter.
+//
+// The one exception: when the direct peer is LOOPBACK, the request reached a
+// loopback-bound RPC through a same-host reverse proxy (our Caddy) — the only
+// thing that can. We then key on the LAST X-Forwarded-For entry, which is the
+// client IP the proxy itself observed and appended AFTER any value the client
+// tried to forge. Without this, every public request shares one bucket (the
+// proxy's), so a single abuser exhausts the shared quota for everyone. Safe only
+// because an external host cannot reach a loopback socket directly; on a directly
+// exposed node the peer is never loopback and XFF stays ignored.
 func clientIP(r *http.Request) string {
 	host, _, err := net.SplitHostPort(r.RemoteAddr)
 	if err != nil {
-		return r.RemoteAddr
+		host = r.RemoteAddr
+	}
+	if ip := net.ParseIP(host); ip != nil && ip.IsLoopback() {
+		if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
+			parts := strings.Split(xff, ",")
+			if last := strings.TrimSpace(parts[len(parts)-1]); last != "" {
+				return last
+			}
+		}
 	}
 	return host
 }

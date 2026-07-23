@@ -129,6 +129,42 @@ func TestForwardedForHeaderIsNotTrusted(t *testing.T) {
 	}
 }
 
+// Behind a same-host reverse proxy (loopback peer), each real client gets its own
+// bucket via the LAST X-Forwarded-For entry — so one abuser can't drain a shared
+// bucket for everyone. A forged earlier XFF entry must not help: only the last
+// (proxy-appended) entry is keyed on.
+func TestForwardedForTrustedFromLoopback(t *testing.T) {
+	clk := time.Unix(0, 0)
+	next, _ := okHandler()
+	rl := NewRateLimiter(next, RateLimit{Burst: 1, PerSecond: 1, MaxTracked: 16}, func() time.Time { return clk })
+
+	// Two different real clients arriving through the loopback proxy — distinct
+	// buckets, both allowed despite Burst=1.
+	mk := func(xff string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(http.MethodPost, "/", nil)
+		req.RemoteAddr = "127.0.0.1:5000"
+		req.Header.Set("X-Forwarded-For", xff)
+		rec := httptest.NewRecorder()
+		rl.ServeHTTP(rec, req)
+		return rec
+	}
+	if c := mk("11.11.11.11").Code; c != http.StatusOK {
+		t.Fatalf("client A first request: got %d, want 200", c)
+	}
+	if c := mk("22.22.22.22").Code; c != http.StatusOK {
+		t.Fatalf("client B (different real IP) must get its own bucket: got %d, want 200", c)
+	}
+	// Client A again — same real IP (last entry), must now be throttled.
+	if c := mk("22.22.22.22").Code; c != http.StatusTooManyRequests {
+		t.Fatalf("client B second request: got %d, want 429", c)
+	}
+	// A forged earlier entry with A's now-spent real IP as the last entry: still
+	// keyed on the last (real) IP, so throttled — the forge buys nothing.
+	if c := mk("99.99.99.99, 22.22.22.22").Code; c != http.StatusTooManyRequests {
+		t.Fatalf("forged leading XFF must not mint a fresh bucket: got %d, want 429", c)
+	}
+}
+
 // TestTrackingMapIsBounded: pushing many distinct IPs through must not grow the
 // map without limit. The map itself is a memory-DoS surface; MaxTracked caps it
 // and evict() enforces the cap.
