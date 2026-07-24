@@ -62,7 +62,7 @@ func TestBondingCurveCreateBuySellSolvent(t *testing.T) {
 	}
 
 	// --- deploy factory ---
-	if st, _ := apply(deployer, 0, nil, big.NewInt(0), contracts.PumpFactoryInit(feeRecipient, feeBps)); st != types.ReceiptSuccess {
+	if st, _ := apply(deployer, 0, nil, big.NewInt(0), contracts.PumpFactoryInit(feeRecipient, feeBps, common.Address{}, common.Address{})); st != types.ReceiptSuccess {
 		t.Fatal("factory deploy failed")
 	}
 	factory := CreateAddress(deployer.Address(), 0)
@@ -172,7 +172,7 @@ func TestBondingCurveSlippageReverts(t *testing.T) {
 		return st, logs
 	}
 
-	apply(deployer, 0, nil, big.NewInt(0), contracts.PumpFactoryInit(common.Address{0xFE}, 100))
+	apply(deployer, 0, nil, big.NewInt(0), contracts.PumpFactoryInit(common.Address{0xFE}, 100, common.Address{}, common.Address{}))
 	factory := CreateAddress(deployer.Address(), 0)
 	_, logs := apply(buyer, 0, &factory, big.NewInt(0), contracts.PumpCreateCalldata("X", "X", nil, big.NewInt(0)))
 	var coin common.Address
@@ -218,7 +218,7 @@ func TestPumpCreateCarriesImageInEvent(t *testing.T) {
 		return st, logs
 	}
 
-	if st, _ := apply(deployer, 0, nil, contracts.PumpFactoryInit(common.Address{0xFE}, 100)); st != types.ReceiptSuccess {
+	if st, _ := apply(deployer, 0, nil, contracts.PumpFactoryInit(common.Address{0xFE}, 100, common.Address{}, common.Address{})); st != types.ReceiptSuccess {
 		t.Fatal("factory deploy failed")
 	}
 	factory := CreateAddress(deployer.Address(), 0)
@@ -298,7 +298,7 @@ func TestPumpCreateWithInitialBuyGoesToCreator(t *testing.T) {
 		return common.Address{}
 	}
 
-	apply(deployer, 0, nil, big.NewInt(0), contracts.PumpFactoryInit(feeRecipient, 100))
+	apply(deployer, 0, nil, big.NewInt(0), contracts.PumpFactoryInit(feeRecipient, 100, common.Address{}, common.Address{}))
 	factory := CreateAddress(deployer.Address(), 0)
 
 	// create WITHOUT value: no initial buy, creator holds nothing.
@@ -358,7 +358,7 @@ func TestPumpFeeReverterDoesNotBrickTrading(t *testing.T) {
 	apply(deployer, 0, nil, big.NewInt(0), contracts.UserTokenDeploy("Rev", "REV", common.LXS(1)))
 	reverter := CreateAddress(deployer.Address(), 0)
 
-	apply(deployer, 1, nil, big.NewInt(0), contracts.PumpFactoryInit(reverter, 100))
+	apply(deployer, 1, nil, big.NewInt(0), contracts.PumpFactoryInit(reverter, 100, common.Address{}, common.Address{}))
 	factory := CreateAddress(deployer.Address(), 1)
 
 	_, logs := apply(buyer, 0, &factory, big.NewInt(0), contracts.PumpCreateCalldata("Doge", "DOGE", nil, big.NewInt(0)))

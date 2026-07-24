@@ -16,11 +16,27 @@ import (
 var pumpFactoryHex string
 
 // PumpFactoryInit is the deploy bytecode with the constructor args (feeRecipient,
-// feeBps) appended. feeRecipient can be an address (platform income) or the burn
-// address (deflation). feeBps is capped at 1000 (10%) by the contract.
-func PumpFactoryInit(feeRecipient common.Address, feeBps uint64) []byte {
+// feeBps, swapFactory, wlxs) appended. feeRecipient can be an address (platform
+// income) or the burn address (deflation). feeBps is capped at 1000 (10%) by the
+// contract. swapFactory + wlxs wire auto-graduation to the LXS-native DEX; pass the
+// zero address for swapFactory to disable graduation (coins stay curve-only).
+func PumpFactoryInit(feeRecipient common.Address, feeBps uint64, swapFactory, wlxs common.Address) []byte {
 	args := append(addrWord(feeRecipient), uint256Word(new(big.Int).SetUint64(feeBps))...)
+	args = append(args, addrWord(swapFactory)...)
+	args = append(args, addrWord(wlxs)...)
 	return append(decodeHex("PumpFactory", pumpFactoryHex), args...)
+}
+
+// Pump graduation selectors/topic: a coin auto-seeds a COIN/WLXS pool once its curve
+// takes GRAD_TARGET native LXS. graduated()/pool() read the state; the Graduated log
+// announces the new pool address.
+const (
+	PumpGraduatedSelector uint32 = 0xe7c2b772 // graduated()
+	PumpPoolSelector      uint32 = 0x16f0115b // pool()
+)
+
+func PumpGraduatedTopic() common.Hash {
+	return common.Keccak256([]byte("Graduated(address,uint256,uint256)"))
 }
 
 const (

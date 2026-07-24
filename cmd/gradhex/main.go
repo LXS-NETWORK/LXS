@@ -26,8 +26,14 @@ func main() {
 		out(contracts.WrappedLXSInit(addr(2)))
 	case "mockrouter-init":
 		out(contracts.MockRouterV2Init())
-	case "factory-init": // <feeRecipient> <feeBps>
-		out(contracts.PumpFactoryInit(addr(2), bigArg(3).Uint64()))
+	case "factory-init": // <feeRecipient> <feeBps> <swapFactory> <wlxs>
+		out(contracts.PumpFactoryInit(addr(2), bigArg(3).Uint64(), addr(4), addr(5)))
+	case "swap-wlxs-init": // (no args) — WETH-style wrapped LXS for the native DEX
+		out(contracts.WlxsInit())
+	case "swap-factory-init": // <feeToSetter> — the LxsSwap (Uniswap-V2) factory
+		out(contracts.LxsSwapFactoryInit(addr(2)))
+	case "swap-router-init": // <factory> <wlxs>
+		out(contracts.LxsSwapRouterInit(addr(2), addr(3)))
 	case "usertoken": // <name> <symbol> <supplyWei>
 		out(contracts.UserTokenDeploy(os.Args[2], os.Args[3], bigArg(4)))
 	case "approve": // <spender> <amountWei>

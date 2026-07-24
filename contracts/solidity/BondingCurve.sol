@@ -12,6 +12,27 @@ pragma solidity ^0.8.0;
 // start, so the real reserve always covers every sell and the virtual reserve is
 // never paid out. This is what lets the curve open with zero real liquidity and
 // stay solvent.
+//
+// GRADUATION: once the curve has taken `gradTarget` of real native LXS, the coin
+// automatically seeds a standard COIN/WLXS pool on the LXS-native Uniswap-V2 DEX
+// (LxsSwap) with the leftover curve tokens + the accumulated native, locks the LP
+// forever, and stops the curve — from then on it trades on the pool, which a price
+// aggregator can index. No "graduate" button, no operator cost: the buyer whose tx
+// crosses the target pays the pool-creation gas, in LXS.
+
+interface IWLXS {
+    function deposit() external payable;
+    function transfer(address to, uint256 value) external returns (bool);
+}
+interface ILxsSwapFactory {
+    // Gated pair: only this coin (the graduator) can perform the first mint, so no one
+    // can pre-seed the pool before graduation and skim the graduation liquidity.
+    function createPairGated(address a, address b, address graduator) external returns (address);
+}
+interface ILxsSwapPair {
+    function mint(address to) external returns (uint256);
+}
+
 contract PumpCoin {
     string public name;
     string public symbol;
@@ -32,6 +53,14 @@ contract PumpCoin {
     uint256 public immutable feeBps;
     uint256 public feeAccrued;               // fees held for a pull withdrawal (never mixed with reserveNative)
 
+    // Graduation wiring (immutable, set by the factory at create): the LXS-native DEX
+    // and wrapped-LXS, and the native target that triggers the move to a real pool.
+    address public immutable swapFactory;
+    address public immutable wlxs;
+    uint256 public immutable gradTarget;
+    bool public graduated;                   // true once the pool is seeded; the curve is then closed
+    address public pool;                     // the COIN/WLXS pair, once graduated
+
     uint256 private unlocked = 1;
     modifier lock() {
         require(unlocked == 1, "PumpCoin: locked");
@@ -41,13 +70,23 @@ contract PumpCoin {
     }
 
     constructor(string memory _name, string memory _symbol, uint256 _curveSupply,
-                uint256 _virtualNative, address _feeRecipient, uint256 _feeBps) {
+                uint256 _virtualNative, address _feeRecipient, uint256 _feeBps,
+                address _swapFactory, address _wlxs, uint256 _gradTarget) {
         name = _name;
         symbol = _symbol;
         curveTokens = _curveSupply;
         virtualNative = _virtualNative;
         feeRecipient = _feeRecipient;
         feeBps = _feeBps;
+        swapFactory = _swapFactory;
+        wlxs = _wlxs;
+        gradTarget = _gradTarget;
+        // Claim this coin's own gated COIN/WLXS pool at birth. Created here (atomically,
+        // before the coin's address is usable by anyone else) and gated to this coin, so
+        // no third party can create or pre-seed it and skim the graduation liquidity.
+        if (_swapFactory != address(0)) {
+            pool = ILxsSwapFactory(_swapFactory).createPairGated(address(this), _wlxs, address(this));
+        }
     }
 
     function _mint(address to, uint256 v) internal {
@@ -76,6 +115,7 @@ contract PumpCoin {
     }
 
     function buyTo(address to, uint256 minTokensOut) public payable lock returns (uint256 out) {
+        require(!graduated, "PumpCoin: graduated - trade on the pool");
         require(msg.value > 0, "PumpCoin: no value");
         require(to != address(0), "PumpCoin: to=0");
         uint256 fee = (msg.value * feeBps) / 10000;
@@ -91,11 +131,38 @@ contract PumpCoin {
         feeAccrued += fee;
         _mint(to, out);
         emit Buy(to, msg.value, out);
+        // Once the curve has taken enough real native, move to a standard pool. Done
+        // last (after all curve state is settled) so _graduate sees the final reserves.
+        if (swapFactory != address(0) && reserveNative >= gradTarget) _graduate();
+    }
+
+    event Graduated(address indexed pool, uint256 tokenLiquidity, uint256 nativeLiquidity);
+
+    // _graduate seeds a COIN/WLXS pool with the leftover curve tokens + the accrued
+    // native, then LOCKS the LP at address(0) so the liquidity can never be pulled
+    // (no rug), and closes the curve. Funded entirely by the curve's own reserves.
+    function _graduate() internal {
+        graduated = true;
+        uint256 tokenLiq = curveTokens;   // the unsold remainder becomes the pool's token side
+        uint256 nativeLiq = reserveNative;
+        curveTokens = 0;
+        reserveNative = 0;
+
+        address pair = pool; // this coin's own gated pool, created at construction — un-pre-seedable
+        _mint(address(this), tokenLiq);   // realise the remainder as real balance to seed the pool
+        IWLXS(wlxs).deposit{value: nativeLiq}();
+
+        _transfer(address(this), pair, tokenLiq);
+        require(IWLXS(wlxs).transfer(pair, nativeLiq), "PumpCoin: wlxs seed");
+        // First mint on the gated pool — permitted only for this coin — with LP sent to
+        // address(0), so the graduation liquidity is locked forever (no rug).
+        ILxsSwapPair(pair).mint(address(0));
+        emit Graduated(pair, tokenLiq, nativeLiq);
     }
 
     // withdrawFees pushes the accrued fees to feeRecipient. Permissionless (anyone may
     // trigger it) and isolated from trading, so a bad feeRecipient bricks nothing else.
-    function withdrawFees() external {
+    function withdrawFees() external lock {
         uint256 f = feeAccrued;
         feeAccrued = 0;
         if (f > 0) {
@@ -105,6 +172,7 @@ contract PumpCoin {
     }
 
     function sell(uint256 amount, uint256 minNativeOut) external lock {
+        require(!graduated, "PumpCoin: graduated - trade on the pool");
         require(amount > 0 && balanceOf[msg.sender] >= amount, "PumpCoin: balance");
         uint256 eff = virtualNative + reserveNative;
         // reverse constant product: returning `amount` tokens releases grossOut.
@@ -167,13 +235,22 @@ contract PumpFactory {
     uint256 public constant VIRTUAL_NATIVE = 30 ether;
     uint256 public constant MAX_IMAGE = 12_288; // 12 KB cap on the embedded thumbnail
 
+    // The native LXS a curve must take before it graduates to a real pool. eff*curveTokens
+    // is invariant (= VIRTUAL_NATIVE*CURVE_SUPPLY), so at target the leftover curve tokens
+    // are VIRTUAL_NATIVE*CURVE_SUPPLY/(VIRTUAL_NATIVE+target) — those + the native seed the pool.
+    uint256 public constant GRAD_TARGET = 300 ether;
+
     address public immutable feeRecipient;
     uint256 public immutable feeBps;
+    address public immutable swapFactory; // LxsSwap factory (address(0) disables graduation)
+    address public immutable wlxs;        // wrapped-LXS used as the pool's base asset
 
-    constructor(address _feeRecipient, uint256 _feeBps) {
+    constructor(address _feeRecipient, uint256 _feeBps, address _swapFactory, address _wlxs) {
         require(_feeBps <= 1000, "PumpFactory: fee too high"); // <= 10%
         feeRecipient = _feeRecipient;
         feeBps = _feeBps;
+        swapFactory = _swapFactory;
+        wlxs = _wlxs;
     }
 
     // create spins up the coin and, if native is sent, performs the creator's first buy in
@@ -184,7 +261,8 @@ contract PumpFactory {
         external payable returns (address)
     {
         require(image.length <= MAX_IMAGE, "PumpFactory: image too big");
-        PumpCoin coin = new PumpCoin(name, symbol, CURVE_SUPPLY, VIRTUAL_NATIVE, feeRecipient, feeBps);
+        PumpCoin coin = new PumpCoin(name, symbol, CURVE_SUPPLY, VIRTUAL_NATIVE, feeRecipient, feeBps,
+                                     swapFactory, wlxs, GRAD_TARGET);
         if (msg.value > 0) {
             coin.buyTo{value: msg.value}(msg.sender, minTokensOut);
         }

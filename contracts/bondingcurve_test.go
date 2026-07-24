@@ -30,7 +30,7 @@ func TestBondingCurveABIConstants(t *testing.T) {
 	if PumpCreatedTopic() != common.Keccak256([]byte("Created(address,address,string,string,bytes)")) {
 		t.Fatal("PumpCreatedTopic drifted")
 	}
-	if len(PumpFactoryInit(common.Address{0x1}, 100)) < 1000 {
+	if len(PumpFactoryInit(common.Address{0x1}, 100, common.Address{}, common.Address{})) < 1000 {
 		t.Fatal("PumpFactory bytecode did not embed")
 	}
 }
